@@ -1,0 +1,34 @@
+DeckyEQ is an independent Decky Loader plugin by Rayek.
+
+The release checker, verified ZIP downloader and update interface are adapted
+from Rayekkk/SpotiDeck and Rayekkk/LegionGo2Companion, under BSD-3-Clause.
+Copyright (c) 2026 Rayekkk. See LICENSE.
+
+The production JavaScript bundle incorporates @decky/api 1.1.3, licensed under
+LGPL-2.1. Its license and the complete installed package source are included in
+the distribution's THIRD_PARTY_LICENSES and THIRD_PARTY_SOURCES directories.
+DeckyEQ's TypeScript source, lockfile and build configuration are included so
+the bundle can be rebuilt with a modified API package.
+
+React and @decky/ui are supplied by Decky/Steam at runtime, not redistributed
+as part of DeckyEQ's production bundle. Development-only preview and test
+dependencies are not included in the plugin ZIP.
+
+PipeWire is an existing system component. DeckyEQ distributes configuration
+and a control client, not PipeWire binaries or external audio effect plugins.
+The graph follows the public PipeWire filter-chain API and the upstream
+sink-eq6 example. No Lenovo or Nahimic assets or presets are included.
+
+The numeric community preset "Legion Go S · Original" is attributed to GAZuOOT.
+Source, original file hashes, actual PipeWire parsing behavior and parameter
+mapping are documented in docs/GO_S_PRESET.md. The original configuration file
+and archive are not redistributed; the preset uses DeckyEQ's own JSON format.
+
+References:
+https://github.com/SteamDeckHomebrew/decky-plugin-template
+https://github.com/SteamDeckHomebrew/decky-frontend-lib
+https://pipewire.pages.freedesktop.org/pipewire/page_module_filter_chain.html
+https://pipewire.pages.freedesktop.org/pipewire/page_man_pw-cli_1.html
+https://github.com/PipeWire/pipewire/blob/master/src/daemon/filter-chain/sink-eq6.conf
+https://github.com/PipeWire/pipewire/blob/master/spa/plugins/filter-graph/filter-graph.c
+https://github.com/PipeWire/pipewire/blob/master/spa/plugins/filter-graph/plugin_builtin.c

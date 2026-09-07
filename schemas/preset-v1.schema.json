@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeckyEQ preset exchange version 1",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["format", "version", "preset"],
+      "properties": {"format": {"const": "deckyeq-preset"}, "version": {"const": 1}, "preset": {"$ref": "#/$defs/preset"}},
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["format", "version", "presets"],
+      "properties": {"format": {"const": "deckyeq-bank"}, "version": {"const": 1},
+        "presets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/preset"}}},
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "preset": {
+      "type": "object", "required": ["name", "eq"], "additionalProperties": false,
+      "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 64}, "eq": {"$ref": "#/$defs/eq"}}
+    },
+    "eq": {
+      "type": "object", "required": ["bands", "bass", "treble", "preamp", "auto_headroom"], "additionalProperties": false,
+      "properties": {
+        "bands": {"type": "array", "minItems": 10, "maxItems": 10, "items": {
+          "type": "object", "required": ["frequency", "gain", "q"], "additionalProperties": false,
+          "properties": {"frequency": {"type": "number", "minimum": 20, "maximum": 20000},
+            "gain": {"type": "number", "minimum": -12, "maximum": 12}, "q": {"type": "number", "minimum": 0.2, "maximum": 5}}
+        }},
+        "bass": {"type": "number", "minimum": -9, "maximum": 9},
+        "treble": {"type": "number", "minimum": -9, "maximum": 9},
+        "preamp": {"type": "number", "minimum": -36, "maximum": 0},
+        "auto_headroom": {"type": "boolean"}
+      }
+    }
+  }
+}

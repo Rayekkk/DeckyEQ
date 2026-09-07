@@ -1,0 +1,9 @@
+node_modules/
+dist/
+artifacts/
+__pycache__/
+*.pyc
+.vite/
+coverage/
+preview-dist/
+.local/

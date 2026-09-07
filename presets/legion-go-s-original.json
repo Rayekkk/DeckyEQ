@@ -1,0 +1,75 @@
+{
+  "format": "deckyeq-preset",
+  "version": 2,
+  "preset": {
+    "name": "Legion Go S · Original",
+    "eq": {
+      "bands": [
+        {
+          "type": "lowshelf",
+          "frequency": 31.25,
+          "gain": -10.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 0.0,
+          "gain": -4.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 125.0,
+          "gain": 5.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 250.0,
+          "gain": 5.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 500.0,
+          "gain": -5.0,
+          "q": 1.0
+        },
+        {
+          "type": "highshelf",
+          "frequency": 1000.0,
+          "gain": -5.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 2000.0,
+          "gain": -5.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 40000.0,
+          "gain": -5.0,
+          "q": 1.0
+        },
+        {
+          "type": "highshelf",
+          "frequency": 48000.0,
+          "gain": 0.0,
+          "q": 1.0
+        },
+        {
+          "type": "peaking",
+          "frequency": 16000.0,
+          "gain": 0.0,
+          "q": 1.0
+        }
+      ],
+      "bass": 0.0,
+      "treble": 0.0,
+      "preamp": 8.0,
+      "auto_headroom": false
+    }
+  }
+}
