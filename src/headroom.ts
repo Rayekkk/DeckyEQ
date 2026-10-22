@@ -13,9 +13,12 @@ export function shelfPeak(gain: number, q: number): number {
   return peak;
 }
 
+/** Mirrors graph.MAX_BOOST: manual headroom still caps the summed peak gain. */
+export const MAX_BOOST = 24;
+
 export function headroom(eq: EQ) {
   const boost = eq.bands.reduce((sum, band) => sum + (band.type === "peaking" ? Math.max(0, band.gain) : shelfPeak(band.gain, band.q)), 0)
     + Math.max(0, eq.bass) + Math.max(0, eq.treble) + Math.max(0, eq.preamp);
-  const compensation = eq.auto_headroom && boost > 0 ? -(boost + 0.5) : 0;
+  const compensation = eq.auto_headroom && boost > 0 ? -(boost + 0.5) : Math.min(0, MAX_BOOST - boost);
   return { compensation, effective_preamp: eq.preamp + compensation };
 }

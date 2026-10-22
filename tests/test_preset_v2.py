@@ -94,6 +94,13 @@ class OriginalPresetTests(unittest.TestCase):
                 self.assertGreaterEqual(bound + 1e-10, measured, (gain, q))
                 self.assertAlmostEqual(bound, measured, delta=0.012, msg=str((gain, q)))
 
+    def test_manual_headroom_caps_extreme_boost(self):
+        eq = flat_eq()
+        eq.update(auto_headroom=False, preamp=12)
+        for band in eq["bands"]:
+            band["gain"] = 12
+        self.assertEqual(headroom(eq), {"compensation": -108, "effective_preamp": -96})
+
     def test_negative_resonant_shelf_also_requires_headroom(self):
         eq = flat_eq()
         eq["bands"][0].update(type="highshelf", gain=-6, q=5)

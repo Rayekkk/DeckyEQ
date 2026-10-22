@@ -17,3 +17,9 @@ it("keeps the version 1 bound for bells and ordinary tone shelves", () => {
   for (const band of eq.bands) band.gain = 2;
   expect(headroom(eq).effective_preamp).toBe(-26.5);
 });
+
+it("caps extreme manual boost at +24 dB like the backend", () => {
+  const eq = flatEQ(); eq.auto_headroom = false; eq.preamp = 12;
+  for (const band of eq.bands) band.gain = 12;
+  expect(headroom(eq)).toEqual({ compensation: -108, effective_preamp: -96 });
+});

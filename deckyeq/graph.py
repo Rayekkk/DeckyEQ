@@ -8,6 +8,9 @@ SINK_NAME = "deckyeq.sink"
 PLAYBACK_NAME = "deckyeq.playback"
 SHELF_Q = 2 ** -0.5
 VARIANTS = (("peaking", ""), ("lowshelf", "_low"), ("highshelf", "_high"))
+# Manual headroom still caps the summed peak gain, so an imported preset cannot add
+# extreme boost while the hardware is at 100%. The Go S original sums to about 19 dB.
+MAX_BOOST = 24.0
 
 
 def shelf_peak(gain, q):
@@ -35,7 +38,7 @@ def headroom(eq):
     # Independent of sample rate; keeps version 1 compensation unchanged.
     boost = sum(max(0, b["gain"]) if b.get("type", "peaking") == "peaking" else shelf_peak(b["gain"], b["q"])
                 for b in eq["bands"]) + max(0, eq["bass"]) + max(0, eq["treble"]) + max(0, eq["preamp"])
-    compensation = -(boost + 0.5) if eq["auto_headroom"] and boost > 0 else 0.0
+    compensation = -(boost + 0.5) if eq["auto_headroom"] and boost > 0 else min(0.0, MAX_BOOST - boost)
     return {"compensation": round(compensation, 4), "effective_preamp": round(eq["preamp"] + compensation, 4)}
 
 

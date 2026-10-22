@@ -13,7 +13,7 @@ if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 
 from deckyeq.runtime import Runtime, environment
-from deckyeq.service import Service
+from deckyeq.service import VERSION, Service
 from deckyeq.storage import PresetFiles, Store
 from deckyeq.updates import PluginUpdates
 
@@ -30,10 +30,16 @@ class Plugin:
             self._updates = PluginUpdates.for_plugin(PLUGIN_DIR)
             settings = Path(decky.DECKY_PLUGIN_SETTINGS_DIR)
             runtime_dir = Path(getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", None) or str(settings / "runtime"))
+            runtime = Runtime(runtime_dir)
+            try:
+                # Restore a volume left at 100% by a crash even if the settings cannot be loaded.
+                await runtime.recover()
+            except Exception:
+                decky.logger.exception("DeckyEQ audio recovery failed")
             files = PresetFiles(environment().get("HOME") or str(Path.home()))
-            self._service = Service(Store(settings), Runtime(runtime_dir), files)
+            self._service = Service(Store(settings), runtime, files)
             await self._service.start()
-            decky.logger.info("DeckyEQ 1.0.0 loaded pid=%s uid=%s audio=%s", os.getpid(),
+            decky.logger.info("DeckyEQ %s loaded pid=%s uid=%s audio=%s", VERSION, os.getpid(),
                               getattr(os, "getuid", lambda: -1)(), self._service.phase)
         except Exception as exc:
             self._startup_error = str(exc)

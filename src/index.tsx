@@ -9,15 +9,12 @@ const status = callable<[], Snapshot>("get_status");
 const perform = callable<[string, Record<string, unknown>, number], Result>("perform");
 const checkUpdates = callable<[], UpdateCheck>("updates_check");
 const downloadUpdate = callable<[string], UpdateDownload>("updates_download");
+// Decky rejects the picker promise when the user closes it; that is not an error.
+const picked = (request: ReturnType<typeof openFilePicker>) =>
+  request.then(result => result?.realpath || result?.path || null, () => null);
 const files: FileUI = {
-  async importFile(home) {
-    const result = await openFilePicker(FileSelectionType.FILE, home, true, false, undefined, ["json"], false, false);
-    return result?.realpath || result?.path || null;
-  },
-  async exportFolder(home) {
-    const result = await openFilePicker(FileSelectionType.FOLDER, home, false, true);
-    return result?.realpath || result?.path || null;
-  },
+  importFile: home => picked(openFilePicker(FileSelectionType.FILE, home, true, false, undefined, ["json"], false, false)),
+  exportFolder: home => picked(openFilePicker(FileSelectionType.FOLDER, home, false, true)),
 };
 
 export default definePlugin(() => {

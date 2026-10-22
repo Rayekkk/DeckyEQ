@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,7 +34,7 @@ class FakeRuntime:
         self.process, self.target = object(), target
         self.default = SINK_NAME
         self.eq = copy.deepcopy(eq)
-    async def apply(self, eq):
+    async def apply(self, eq, max_age=0.0):
         self.events.append("apply")
         self.eq = copy.deepcopy(eq)
         if self.gate: await self.gate.wait()
@@ -95,6 +96,22 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.load(), old)
         self.assertEqual(self.runtime.eq, old["working"])
 
+    async def test_unexpected_audio_error_still_rolls_back(self):
+        await self.act("enable", enabled=True)
+        old = copy.deepcopy(self.service.data)
+        original, calls = self.runtime.apply, []
+        async def flaky(eq, max_age=0.0):
+            calls.append(eq)
+            if len(calls) == 1: raise KeyError("odd node data")
+            await original(eq, max_age)
+        eq = flat_eq()
+        eq["bass"] = 6
+        with patch.object(self.runtime, "apply", side_effect=flaky):
+            result = await self.act("edit", eq=eq)
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.service.data, old)
+        self.assertEqual(self.runtime.eq, old["working"])
+
     async def test_stale_revision_cannot_overwrite_newer_draft(self):
         await self.act("save_as", name="New")
         result = await self.service.action("edit", {"eq": flat_eq()}, 0)
@@ -121,6 +138,83 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.running)
         self.assertEqual(self.runtime.default, "bluez_output.headset")
         self.assertEqual(self.service.phase, "bypassed")
+
+    async def test_selecting_hardware_in_steam_bypasses_instead_of_playing_at_full_volume(self):
+        await self.act("enable", enabled=True)
+        self.runtime.default = "alsa_output.speakers"
+        await self.service._sync(self.service.data)
+        self.assertEqual(self.service.phase, "bypassed")
+        self.assertIsNone(self.runtime.process)
+        await self.service._sync(self.service.data)
+        self.assertEqual(self.runtime.events.count("start"), 1)
+        self.runtime.default = "bluez_output.headset"
+        await self.service._sync(self.service.data)
+        self.runtime.default = "alsa_output.speakers"
+        await self.service._sync(self.service.data)
+        self.assertEqual(self.service.phase, "active")
+        self.assertEqual(self.runtime.default, SINK_NAME)
+
+    async def test_refresh_reroutes_after_hardware_was_selected_in_steam(self):
+        await self.act("enable", enabled=True)
+        self.runtime.default = "alsa_output.speakers"
+        self.assertTrue((await self.act("refresh"))["ok"])
+        self.assertEqual(self.runtime.events.count("start"), 2)
+        self.assertEqual(self.runtime.default, SINK_NAME)
+        self.assertEqual(self.service.phase, "active")
+
+    async def test_enabling_while_bluetooth_is_selected_waits_instead_of_taking_playback(self):
+        self.runtime.default = "bluez_output.headset"
+        self.assertTrue((await self.act("enable", enabled=True))["ok"])
+        self.assertNotIn("start", self.runtime.events)
+        self.assertEqual(self.runtime.default, "bluez_output.headset")
+        self.assertEqual(self.service.phase, "bypassed")
+        self.assertTrue((await self.act("refresh"))["ok"])
+        self.assertEqual(self.runtime.default, SINK_NAME)
+
+    async def test_disabled_monitor_does_not_poll_audio_tools(self):
+        with patch.object(self.runtime, "scan", side_effect=AssertionError("scanned while off")):
+            await self.service._sync(self.service.data)
+        self.assertEqual(self.service.phase, "off")
+        with patch.object(self.runtime, "scan", wraps=self.runtime.scan) as scan:
+            await self.service.status()
+        scan.assert_awaited_once()
+
+    async def test_repeated_failures_back_off_up_to_a_minute(self):
+        delays = []
+        for _ in range(6):
+            self.service._failed(EQError("no audio"))
+            delays.append(round(self.service.retry_at - time.monotonic()))
+        self.assertEqual(delays, [8, 16, 32, 60, 60, 60])
+        await self.act("enable", enabled=True)
+        self.assertEqual(self.service.failures, 0)
+
+    async def test_unexpected_monitor_error_pauses_audio_without_stopping_monitoring(self):
+        await self.act("enable", enabled=True)
+        real_sleep = asyncio.sleep
+        async def tick(_): await real_sleep(0)
+        with patch.object(self.runtime, "scan", side_effect=KeyError("index")),                 patch.object(self.runtime, "stop", side_effect=AttributeError("stop failed too")),                 patch("deckyeq.service.asyncio.sleep", side_effect=tick):
+            self.service.monitor.cancel()
+            self.service.monitor = asyncio.create_task(self.service._watch())
+            for _ in range(50):
+                await real_sleep(0)
+                if self.service.phase == "error": break
+        self.assertEqual(self.service.phase, "error")
+        self.assertFalse(self.service.monitor.done())
+
+    async def test_close_during_startup_leaves_no_monitor_or_routing(self):
+        service = Service(self.store, FakeRuntime(), PresetFiles(self.home))
+        service.data["enabled"] = True
+        service.data["target"] = "alsa_output.speakers"
+        gate = asyncio.Event()
+        service.runtime.recover = gate.wait
+        start = asyncio.create_task(service.start())
+        await asyncio.sleep(0)
+        close = asyncio.create_task(service.close())
+        await asyncio.sleep(0)
+        gate.set()
+        await asyncio.gather(start, close)
+        self.assertIsNone(service.monitor)
+        self.assertIsNone(service.runtime.process)
 
     async def test_output_disconnection_waits_without_retargeting(self):
         await self.act("enable", enabled=True)

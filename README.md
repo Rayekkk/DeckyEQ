@@ -54,7 +54,7 @@ acceptance remain open. Other handhelds have not been validated. See the
 ## Installation
 
 1. Install [Decky Loader](https://decky.xyz) if it is not already installed.
-2. Download **DeckyEQ-1.0.0.zip** from the [latest release](https://github.com/Rayekkk/DeckyEQ/releases/latest), or build it from source below.
+2. Download the **DeckyEQ-<version>.zip** asset from the [latest release](https://github.com/Rayekkk/DeckyEQ/releases/latest), or build it from source below.
 3. In Gaming Mode, open **Quick Access Menu → Decky → Settings → Developer**.
 4. Choose **Install Plugin from ZIP** and select the archive.
 5. Open **DeckyEQ** in the Decky menu and turn on **Enable EQ**.
@@ -124,7 +124,9 @@ volume back and restores hardware playback.
 
 **Speaker port only** bypasses EQ when the selected device switches away from its speaker
 port. Turn it off to apply EQ to a selected headset or HDMI output. A manual output change
-in Steam is respected. Disabling or unloading the plugin stops its audio processing and
+in Steam is respected: selecting the physical speaker directly bypasses EQ and returns
+your volume to it, instead of playing at the 100% hardware level. Use **Refresh** in
+**Output** to resume. Disabling or unloading the plugin stops its audio processing and
 keeps your preset library.
 
 Automatic headroom can make boosted presets quieter by reserving room for their peaks.

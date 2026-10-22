@@ -45,6 +45,15 @@ class AudioServer(Runtime):
                         volume={"front-left": {"value": 45864}, "front-right": {"value": 45864}})
         self.virtual = {"name": SINK_NAME, "index": 3, "mute": False, "channel_map": ["front-left", "front-right"],
                         "volume": {"front-left": {"value": UNITY_VOLUME}, "front-right": {"value": UNITY_VOLUME}}}
+        self.routes = {}
+
+    def set_port(self, name, port):
+        """Like WirePlumber: remember the current route's volume and restore the new route's."""
+        sink = next(s for s in self.sinks if s["name"] == name)
+        self.routes[(name, sink["active_port"])] = copy.deepcopy(sink["volume"])
+        sink["active_port"] = port
+        if (name, port) in self.routes:
+            sink["volume"] = copy.deepcopy(self.routes[(name, port)])
 
     async def run(self, tool, *args, **_):
         self.commands.append((tool, *args))
@@ -169,6 +178,116 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         self.runtime.drop_node = True
         with self.assertRaises(EQError): await self.runtime.apply(flat_eq())
+
+    async def test_polling_skips_readback_only_while_recent_and_sink_listed(self):
+        await self.start()
+        await self.runtime.scan()
+        self.runtime.commands.clear()
+        await self.runtime.apply(flat_eq(), max_age=15)
+        self.assertEqual(self.runtime.commands, [])
+        eq = flat_eq()
+        eq["bass"] = 2
+        await self.runtime.apply(eq, max_age=15)
+        self.assertEqual(self.runtime.actual["bass:Gain"], 2)
+        self.runtime.commands.clear()
+        self.runtime.sink_present = False
+        await self.runtime.apply(eq, max_age=15)
+        self.assertIn(("pw-dump",), self.runtime.commands)
+        self.runtime.commands.clear()
+        self.runtime.sink_present = True
+        self.runtime.verified_at -= 16
+        await self.runtime.apply(eq, max_age=15)
+        self.assertIn(("pw-dump",), self.runtime.commands)
+
+    async def test_interrupted_stop_keeps_journal_until_volume_is_restored(self):
+        for interruption in (AttributeError("odd pactl data"), asyncio.CancelledError()):
+            await self.start()
+            self.assertEqual(self.runtime.sinks[0]["volume"]["front-left"]["value"], UNITY_VOLUME)
+            with patch.object(self.runtime, "_restore_level", side_effect=interruption):
+                with self.assertRaises(type(interruption)): await self.runtime.stop()
+            self.assertTrue(self.runtime.journal.exists())
+            await self.runtime.recover()
+            self.assertFalse(self.runtime.journal.exists())
+            self.assertEqual(self.runtime.sinks[0]["volume"]["front-left"]["value"], 45864)
+
+    def test_malformed_sink_properties_are_ignored(self):
+        outputs = normalize_sinks([{"name": "alsa_output.speaker", "properties": ["bad"], "active_port": "speaker"}])
+        self.assertEqual(outputs[0]["serial"], "")
+
+    def volume(self, sink):
+        return [entry["value"] for entry in sink["volume"].values()]
+
+    def set_volume(self, sink, value):
+        for entry in sink["volume"].values():
+            entry["value"] = value
+
+    async def test_port_change_keeps_user_volume_until_the_speaker_returns(self):
+        speaker = self.runtime.sinks[0]
+        self.runtime.routes[("alsa_output.speaker", "headphones")] = {
+            "front-left": {"value": 30000}, "front-right": {"value": 30000}}
+        await self.start()
+        self.set_volume(self.runtime.virtual, 20000)  # The user turns the EQ volume down.
+        await self.runtime.scan()
+        self.runtime.set_port("alsa_output.speaker", "headphones")
+        await self.runtime.stop()  # Speaker-only bypass.
+        self.assertEqual(self.volume(speaker), [30000, 30000])
+        self.assertTrue(self.runtime.journal.exists())
+        self.runtime.set_port("alsa_output.speaker", "analog-output-speaker")
+        self.assertEqual(self.volume(speaker), [UNITY_VOLUME] * 2)  # The route we held at 100%.
+        await self.start()
+        self.assertEqual(self.volume(self.runtime.virtual), [20000, 20000])
+        await self.runtime.stop()
+        self.assertEqual(self.volume(speaker), [20000, 20000])
+        self.assertFalse(self.runtime.journal.exists())
+
+    async def test_disconnected_device_neither_blocks_eq_nor_loses_its_volume(self):
+        await self.runtime.start(flat_eq(), "bluez_output.headset")
+        headset = self.runtime.sinks.pop(1)
+        await self.runtime.stop()
+        self.assertTrue(self.runtime.journal.exists())
+        await self.start()
+        await self.runtime.stop()
+        self.assertTrue(self.runtime.journal.exists())
+        headset["properties"] = {"object.serial": 999}  # Reconnected as a new node.
+        self.set_volume(headset, UNITY_VOLUME)
+        self.runtime.sinks.append(headset)
+        await self.runtime.recover()
+        self.assertEqual(self.volume(headset), [45864, 45864])
+        self.assertFalse(self.runtime.journal.exists())
+
+    async def test_failed_restore_mutes_hardware_before_stopping_the_filter(self):
+        await self.start()
+        with patch.object(self.runtime, "_restore_level", side_effect=EQError("pactl timed out")):
+            with self.assertRaises(EQError): await self.runtime.stop()
+        self.assertTrue(self.runtime.sinks[0]["mute"])
+        await self.runtime.recover()
+        self.assertFalse(self.runtime.sinks[0]["mute"])
+        self.assertEqual(self.volume(self.runtime.sinks[0]), [45864, 45864])
+
+    async def test_unreadable_journal_is_set_aside_instead_of_blocking_eq(self):
+        self.runtime.journal.write_text('{"version": 3, "previous": []}', encoding="utf-8")
+        with self.assertRaises(EQError): await self.runtime.recover()
+        self.assertFalse(self.runtime.journal.exists())
+        self.assertTrue(self.runtime.journal.with_name("routing.invalid.json").exists())
+        await self.start()
+
+    async def test_version_2_journal_is_still_restored(self):
+        speaker = self.runtime.sinks[0]
+        self.set_volume(speaker, UNITY_VOLUME)
+        level = {"values": [20000, 20000], "mute": False}
+        self.runtime.journal.write_text(json.dumps({"version": 2, "previous": "alsa_output.speaker", "volume": {
+            "target": "alsa_output.speaker", "serial": "7", "original": level, "last": level},
+            "volume_committed": True}), encoding="utf-8")
+        await self.runtime.recover()
+        self.assertEqual(self.volume(speaker), [20000, 20000])
+        self.assertFalse(self.runtime.journal.exists())
+
+    async def test_stop_without_a_session_keeps_pending_restores(self):
+        level = {"values": [20000, 20000], "mute": False}
+        self.runtime.journal.write_text(json.dumps({"version": 3, "pending": [
+            {"target": "bluez_output.gone", "port": "", "force": False, "level": level}]}), encoding="utf-8")
+        await self.runtime.stop()
+        self.assertTrue(self.runtime.journal.exists())
 
     async def test_external_control_drift_repaired(self):
         await self.start()

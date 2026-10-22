@@ -9,6 +9,18 @@ not published releases. The public build includes the later audio and dropdown
 fixes. Its GitHub preparation and updater checks run locally; that prepared
 archive has not been installed on the device.
 
+## Unreleased hardening (not yet validated on a device)
+
+- `npm run check` passes: 119 Python tests on Windows (13 POSIX/symlink tests
+  skip there; all 119 pass on Linux), 32 UI tests, the production build and
+  packaging.
+- Covered by tests with a protocol fake, not by hardware: bypass when the
+  physical output is chosen in Steam, the restore journal surviving an
+  interrupted stop, no takeover of Bluetooth playback on enable, idle polling
+  and retry backoff, the +24 dB manual boost cap, stable filter frequency
+  ranges and settings recovery from malformed values.
+- Hardware acceptance on the Legion Go is still required before release.
+
 ## Public 1.0.0 local preparation
 
 - `npm run check` passes type checking, Python tests, UI tests, the production

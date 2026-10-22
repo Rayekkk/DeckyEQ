@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 import re
 import uuid
 
@@ -20,13 +19,26 @@ class EQError(ValueError):
 
 
 def number(value, low, high, label):
-    if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+    # The range check also rejects NaN/inf and runs before float(), which overflows on huge JSON integers.
+    if type(value) not in (int, float) or not low <= value <= high:
         raise EQError(f"{label} must be a number between {low} and {high}.")
     return float(value)
 
 
+def frequency(value, legacy=False):
+    hz = number(value, 20 if legacy else 0, 20000 if legacy else 48000, "Frequency")
+    # PipeWire's float32 biquads are unstable below ~6 Hz and just under Nyquist.
+    # 0 Hz and >= 24 kHz become constant gains at 44.1/48 kHz and stay valid for old presets.
+    if 0 < hz < 20:
+        return 20.0
+    if 20000 < hz < 24000:
+        return 20000.0
+    return hz
+
+
 def name(value):
-    if not isinstance(value, str) or not 1 <= len(value.strip()) <= 64 or any(ord(c) < 32 for c in value):
+    if (not isinstance(value, str) or not 1 <= len(value.strip()) <= 64 or
+            any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
         raise EQError("Preset names must contain 1–64 printable characters.")
     return value.strip()
 
@@ -65,7 +77,7 @@ def validate_eq(value, legacy=False):
         kind = band.get("type", "peaking")  # Version 1 bands are all bells.
         if kind not in FILTER_TYPES:
             raise EQError(f"Band {i + 1} has an unsupported filter type.")
-        cleaned.append({"type": kind, "frequency": number(band["frequency"], 20 if legacy else 0, 20000 if legacy else 48000, "Frequency"),
+        cleaned.append({"type": kind, "frequency": frequency(band["frequency"], legacy),
                         "gain": number(band["gain"], -12, 12, "Band gain"),
                         "q": number(band["q"], 0.2, 5, "Band Q")})
     if type(value["auto_headroom"]) is not bool:
@@ -106,7 +118,7 @@ def validate_state(value):
         ids.add(item["id"])
         result["presets"].append({"id": item["id"], "name": name(item.get("name")),
                                    "eq": validate_eq(item.get("eq"), legacy=value["version"] == 1)})
-    if value.get("selected") not in ids:
+    if not isinstance(value.get("selected"), str) or value["selected"] not in ids:
         raise EQError("The selected preset is missing.")
     result["selected"] = value["selected"]
     return result

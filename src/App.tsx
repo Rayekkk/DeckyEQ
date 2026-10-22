@@ -2,7 +2,7 @@ import { ComponentProps, useEffect, useState, useSyncExternalStore } from "react
 import { ButtonItem, ConfirmModal, DropdownItem, Field, PanelSection,
   PanelSectionRow, showModal, SliderField, TextField, ToggleField } from "@decky/ui";
 import { Controller } from "./controller";
-import { cloneEQ, db, EQ, FilterType, formatHz } from "./types";
+import { cloneEQ, db, EQ, FilterType, formatHz, safeFrequency } from "./types";
 import { UpdateController, UpdateSection } from "./updates";
 
 const filterTypes: { data: FilterType; label: string }[] = [
@@ -110,7 +110,9 @@ export function App({ controller, files, updates, visible = true }: { controller
     if (locked) return;
     setPicking(true);
     try {
+      controller.clearMessage();
       await controller.flush();
+      if (controller.getSnapshot().error) return;  // Keep a failed edit visible instead of exporting around it.
       if (kind === "import") {
         const path = await files.importFile(snapshot.home);
         if (path) await controller.action("import", { path });
@@ -170,12 +172,13 @@ export function App({ controller, files, updates, visible = true }: { controller
           <PanelSectionRow><DropdownItem label="Filter type" layout="below" childrenContainerWidth="max" selectedOption={eq.bands[bandIndex].type} disabled={locked}
             rgOptions={filterTypes} onChange={option => bandChange(bandIndex, { type: option.data })} /></PanelSectionRow>
           <PanelSectionRow><SliderField label={`Frequency · ${formatHz(eq.bands[bandIndex].frequency)}`}
-            value={Math.log10(eq.bands[bandIndex].frequency + 1)} min={0} max={Math.log10(48001)} step={0.005}
-            disabled={locked} onChange={value => bandChange(bandIndex, { frequency: Math.min(48000, Math.max(0, Math.round((10 ** value - 1) * 100) / 100)) })} /></PanelSectionRow>
+            value={Math.log10(Math.min(20000, Math.max(20, eq.bands[bandIndex].frequency)))} min={Math.log10(20)} max={Math.log10(20000)} step={0.005}
+            disabled={locked} onChange={value => bandChange(bandIndex, { frequency: Math.min(20000, Math.max(20, Math.round(10 ** value * 100) / 100)) })} /></PanelSectionRow>
           <PanelSectionRow><TextField label="Exact frequency (Hz)" value={frequencyText} disabled={locked}
+            description="20 Hz – 20 kHz. 0 Hz and 24–48 kHz are also accepted for compatibility with the original Go S preset."
             onChange={event => setFrequencyText(event.target.value.slice(0, 20))} /></PanelSectionRow>
           <PanelSectionRow><ActionButton disabled={locked || !validFrequency || exactFrequency === currentFrequency}
-            onClick={() => bandChange(bandIndex, { frequency: exactFrequency })}>Apply exact frequency</ActionButton></PanelSectionRow>
+            onClick={() => bandChange(bandIndex, { frequency: safeFrequency(exactFrequency) })}>Apply exact frequency</ActionButton></PanelSectionRow>
           <PanelSectionRow><SliderField label="Width · Q" description={eq.bands[bandIndex].type === "peaking" ? "Higher Q affects a narrower range." : "Higher Q adds resonance around the shelf transition."}
             value={eq.bands[bandIndex].q} min={0.2} max={5} step={0.1} showValue disabled={locked}
             onChange={value => bandChange(bandIndex, { q: value })} /></PanelSectionRow>
@@ -232,7 +235,7 @@ export function App({ controller, files, updates, visible = true }: { controller
         {slider("Input level", eq.preamp, value => change({ preamp: value }), -36, 12)}
         <PanelSectionRow><Field label="Effective input level" description="Includes automatic headroom compensation.">
           <span className="deq-value">{db(audio.effective_preamp)}</span></Field></PanelSectionRow>
-        {!eq.auto_headroom && <PanelSectionRow><Field label="Headroom is manual" description="Positive EQ gains can clip. Reduce the input level when boosting frequencies." /></PanelSectionRow>}
+        {!eq.auto_headroom && <PanelSectionRow><Field label="Headroom is manual" description="Positive EQ gains can clip. Reduce the input level when boosting frequencies. Total boost is limited to +24 dB." /></PanelSectionRow>}
       </PanelSection>
       <PanelSection title="Reset">
         <PanelSectionRow><ActionButton disabled={locked} onClick={() => confirm("Reset EQ controls?", "Reset this draft to flat. Saved presets will stay in your library.", () => void controller.action("reset"))}>Reset current controls</ActionButton></PanelSectionRow>

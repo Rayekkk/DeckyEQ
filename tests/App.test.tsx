@@ -90,7 +90,7 @@ it("selects the original Go S preset including shelves and positive input level"
   expect(engine.value.presets.at(-1)?.eq).toEqual(engine.value.presets[1].eq);
 });
 
-it("edits filter type and exact fractional or zero frequency live", async () => {
+it("edits filter type and exact frequency live, snapping unstable ranges", async () => {
   const { controller, engine } = await setup();
   fireEvent.click(screen.getByRole("switch", { name: "Edit filter type, frequency & width" }));
   fireEvent.change(screen.getByRole("combobox", { name: "Filter type" }), { target: { value: "highshelf" } });
@@ -101,7 +101,33 @@ it("edits filter type and exact fractional or zero frequency live", async () => 
   fireEvent.change(screen.getByRole("textbox", { name: "Exact frequency (Hz)" }), { target: { value: "0" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply exact frequency" }));
   await act(async () => { await controller.flush(); });
-  expect((screen.getByRole("slider", { name: "Frequency · 0 Hz" }) as HTMLInputElement).value).toBe("0");
+  expect(engine.value.state.working.bands[0].frequency).toBe(0);
+  fireEvent.change(screen.getByRole("textbox", { name: "Exact frequency (Hz)" }), { target: { value: "5" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply exact frequency" }));
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.state.working.bands[0].frequency).toBe(20);
+  fireEvent.change(screen.getByRole("textbox", { name: "Exact frequency (Hz)" }), { target: { value: "23999" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply exact frequency" }));
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.state.working.bands[0].frequency).toBe(20000);
   fireEvent.change(screen.getByRole("textbox", { name: "Exact frequency (Hz)" }), { target: { value: "48001" } });
   expect((screen.getByRole("button", { name: "Apply exact frequency" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("keeps a failed edit visible instead of exporting around it", async () => {
+  const { files, perform, engine } = await setup();
+  perform.mockImplementationOnce(async () => ({ ok: false, error: "Simulated failure", state: await engine.status() }));
+  fireEvent.change(screen.getByRole("slider", { name: "Bass · below 120 Hz" }), { target: { value: "3" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "presets" } });
+  fireEvent.click(screen.getByRole("button", { name: "Export current sound to folder…" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("Simulated failure");
+  expect(files.exportFolder).not.toHaveBeenCalled();
+});
+
+it("opens the file picker again after an earlier, unrelated error", async () => {
+  const { controller, files } = await setup();
+  act(() => controller.reportError("Earlier rename failed"));
+  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "presets" } });
+  fireEvent.click(screen.getByRole("button", { name: "Import preset or bank…" }));
+  await waitFor(() => expect(files.importFile).toHaveBeenCalled());
 });

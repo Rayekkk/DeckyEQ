@@ -2,6 +2,7 @@ import { cloneElement, ReactElement } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { PreviewEngine } from "../preview/engine";
+import { openFilePicker } from "@decky/api";
 
 const decky = vi.hoisted(() => ({
   visible: true,
@@ -124,4 +125,15 @@ it("pauses hidden polling but accepts an explicit preset selection", async () =>
   visibility(true);
   await act(async () => { await vi.advanceTimersByTimeAsync(0); });
   expect((screen.getByRole("combobox", { name: "Current preset" }) as HTMLSelectElement).value).toBe("go-s-original");
+});
+
+it("treats a closed file picker as a cancel, not an error", async () => {
+  vi.mocked(openFilePicker).mockRejectedValueOnce("User canceled");
+  await setup();
+  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "presets" } });
+  fireEvent.click(screen.getByRole("button", { name: "Import preset or bank…" }));
+  await waitFor(() => expect(openFilePicker).toHaveBeenCalled());
+  await waitFor(() => expect((screen.getByRole("button", { name: "Import preset or bank…" }) as HTMLButtonElement).disabled).toBe(false));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(decky.perform.mock.calls.some(call => call[0] === "import")).toBe(false);
 });

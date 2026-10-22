@@ -133,13 +133,37 @@ class GraphTests(unittest.TestCase):
         self.assertAlmostEqual(headroom(eq)["effective_preamp"], -26.5)
         self.assertLess(10 ** (25 / 20) * controls(eq)["level:Mult"], 1)
         eq["auto_headroom"] = False
-        self.assertAlmostEqual(headroom(eq)["effective_preamp"], -1)
+        self.assertAlmostEqual(headroom(eq)["effective_preamp"], -2)  # 25 dB summed boost, capped at 24.
 
     def test_pw_dump_rounding_at_low_input_level(self):
         expected = {"level:Mult": 0.008358531817878144}
         self.assertTrue(same_controls({"level:Mult": 0.008359}, expected))
         self.assertFalse(same_controls({"level:Mult": 0.0084}, expected))
         self.assertFalse(same_controls({"level:Mult": 0}, expected))
+
+
+class HardeningTests(unittest.TestCase):
+    def test_unstable_filter_frequencies_are_clamped(self):
+        eq = flat_eq()
+        for band, hz in zip(eq["bands"], (0, 1, 19.9, 20, 20000, 23999, 24000, 48000, 1000, 1000)):
+            band["frequency"] = hz
+        self.assertEqual([b["frequency"] for b in validate_eq(eq)["bands"]],
+                         [0, 20, 20, 20, 20000, 20000, 24000, 48000, 1000, 1000])
+
+    def test_huge_or_non_finite_numbers_are_rejected(self):
+        for value in (10 ** 400, -(10 ** 400), float("nan"), float("inf"), True):
+            eq = flat_eq()
+            eq["bass"] = value
+            with self.assertRaises(EQError): validate_eq(eq)
+
+    def test_unprintable_or_unencodable_names_are_rejected(self):
+        for title in ("bad\x7f", "lone \ud800 surrogate", "tab\there"):
+            with self.assertRaises(EQError): create_preset(initial_state(), title, flat_eq())
+
+    def test_malformed_selected_preset_is_a_validation_error(self):
+        state = initial_state()
+        state["selected"] = ["flat"]
+        with self.assertRaises(EQError): validate_state(state)
 
 
 class StorageTests(unittest.TestCase):
@@ -159,6 +183,24 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.load()["working"]["bass"], 0)
         self.assertIn("Recovered", self.store.warning)
         self.assertEqual(self.store.path.read_text(), "{broken")
+
+    def test_malformed_values_fall_back_to_last_good_settings(self):
+        self.store.save(initial_state())
+        self.store.save(initial_state())
+        good = json.dumps(initial_state())
+        for text in (good.replace('"selected": "flat"', '"selected": ["flat"]'),
+                     good.replace('"bass": 0.0', '"bass": ' + "9" * 400, 1)):
+            self.assertNotEqual(text, good)
+            self.store.path.write_text(text, encoding="utf-8")
+            self.store.warning = None
+            self.assertEqual(self.store.load(), initial_state())
+            self.assertIn("Recovered", self.store.warning)
+
+    def test_symlink_loop_is_a_validation_error(self):
+        loop = self.home / "loop"
+        try: loop.symlink_to(loop)
+        except OSError: self.skipTest("Host cannot create symbolic links")
+        with self.assertRaises(EQError): self.files.read(str(loop / "preset.json"))
 
     def test_corruption_is_not_silently_reset(self):
         self.store.path.write_text("{broken", encoding="utf-8")

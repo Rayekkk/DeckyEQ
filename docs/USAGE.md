@@ -94,6 +94,11 @@ compensation. Consequently the sound can
 become quieter when boosting several bands. It is not a limiter, a loudness
 normalizer or a guarantee against physical speaker distortion.
 
+With automatic headroom off, the same bound is still capped: if the summed
+boost exceeds +24 dB, the input level is lowered by the excess. This keeps an
+imported preset from adding extreme gain while the hardware runs at 100%. The
+original Go S preset sums to about +19 dB and is unaffected.
+
 The runtime lowers the input level before altering filters, makes large gain
 changes in several steps, then sets the final input level. The frontend coalesces
 fast drags; all backend transactions are serialized. Final parameters are read
@@ -108,29 +113,48 @@ library environment, rather than Decky's frozen PluginLoader executable.
 Each slot contains three native biquads in series; only the selected type has
 nonzero gain. The fixed graph has 33 nodes per channel, including the input
 level and two tone shelves. Type changes therefore do not restart audio.
-Frequency values outside the useful audible range are retained for exact
-compatibility with the original Go S file. Their effect depends on filter type
-and the session sample rate; a bell at or above Nyquist has no effect.
+The frequency slider covers 20 Hz – 20 kHz. PipeWire's single-precision
+biquads become unstable below about 6 Hz and just under Nyquist, so values
+between 0 and 20 Hz snap to 20 Hz and values between 20 and 24 kHz snap to
+20 kHz, including in imported presets and saved settings. Exactly 0 Hz and
+24–48 kHz are retained for compatibility with the original Go S file. Their
+effect depends on filter type and the session sample rate; a bell at or above
+Nyquist has no effect.
 
 ## Output switching and cleanup
 
 **Speaker port only** is enabled initially. It checks the actual selected
 output's active port; a missing/unknown port is bypassed rather than guessed.
 Turn it off if you deliberately want to EQ a selected headset, USB device or
-HDMI output. The monitor checks routes approximately every 1.5 seconds, plus
-command time. This is a software polling guard, not an instantaneous hardware
+HDMI output. While EQ is enabled, the monitor checks routes approximately every
+1.5 seconds, plus command time (while it is off, the output list refreshes only
+while the panel is open); a full PipeWire control readback runs every 15 seconds or
+immediately when DeckyEQ's output disappears. Every edit is read back at once.
+After a failure, retries wait 8, 16, 32 and then 60 seconds. This is a software polling guard, not an instantaneous hardware
 interlock; there can be a short transition before bypass.
 
-A manual default-output change in Steam is respected. EQ waits until the target
-is selected again, or until **Refresh / reconnect EQ** explicitly reactivates it.
+A manual default-output change in Steam is respected. The physical output runs
+at 100% while EQ is active, so selecting it directly in Steam also bypasses EQ
+and transfers your volume back. EQ stays bypassed until another output is
+selected and the target returns, or until **Refresh / reconnect EQ** explicitly
+reactivates it. Enabling EQ or changing its output while Steam plays through
+another device, such as Bluetooth headphones, also waits; only **Refresh /
+reconnect EQ** takes playback over immediately.
 Unplugging the target pauses EQ; reconnecting it can restore the saved settings.
 
 Turning **Enable EQ** off or unloading the plugin restores routing and terminates
 the owned filter process, while keeping the preset library. New streams that used
-DeckyEQ are also moved back. A Linux parent-death signal prevents a filter process
-remaining behind after an unexpected backend exit. A small recovery journal
-records the previous default before changing it. After a crash the audio session
-manager may temporarily choose a fallback until normal routing is restored.
+DeckyEQ are also moved back. The filter runs under a small supervisor attached to
+Decky with a Linux parent-death signal. If the Decky backend dies, the supervisor
+first returns your EQ volume to the hardware output, then stops the filter; the
+audio session manager then moves playback to that output at your volume instead
+of the 100% hardware level used while EQ runs.
+
+A recovery journal records the previous default output and every volume that is
+still owed. Audio routes keep their own volume per port, so when a headphone plug
+or a disconnected Bluetooth device interrupts EQ, the restore waits for that
+device and port to return instead of being lost; it never blocks EQ on another
+output. If the hardware volume was changed in the meantime, that change is kept.
 
 The plugin never terminates an unrelated process. A pre-existing DeckyEQ sink
 that it does not own blocks activation with an explanatory error.

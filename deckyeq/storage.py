@@ -69,7 +69,7 @@ class Store:
                 if path == self.backup:
                     self.warning = "Recovered the last good settings. Check your most recent edits."
                 return result
-            except (OSError, ValueError, UnicodeError, RecursionError):
+            except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
                 continue
         raise EQError("Settings could not be read. Existing files were preserved; restore a valid backup before editing.")
 
@@ -98,9 +98,11 @@ class PresetFiles:
         raw = Path(path)
         if not raw.is_absolute():
             raise EQError("An absolute file path is required.")
-        candidate = raw.resolve()
         try:
+            candidate = raw.resolve()  # Raises RuntimeError on Python < 3.13 for a symlink loop.
             candidate.relative_to(self.home)
+        except (OSError, RuntimeError):
+            raise EQError("This path cannot be resolved.") from None
         except ValueError:
             raise EQError("Choose a path inside your home directory.") from None
         for part in (raw, *raw.parents):

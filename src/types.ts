@@ -31,6 +31,8 @@ export const flatEQ = (): EQ => ({
   bands: frequencies.map(frequency => ({ frequency, gain: 0, q: 1.4, type: "peaking" })),
   bass: 0, treble: 0, preamp: 0, auto_headroom: true,
 });
-export const cloneEQ = (eq: EQ): EQ => ({ ...eq, bands: eq.bands.map(band => ({ ...band })) });
+/** Mirrors model.frequency(): unstable float32 biquad ranges snap to the audible band. */
+export const safeFrequency = (hz: number) => hz > 0 && hz < 20 ? 20 : hz > 20000 && hz < 24000 ? 20000 : hz;
+export const cloneEQ =(eq: EQ): EQ => ({ ...eq, bands: eq.bands.map(band => ({ ...band })) });
 export const formatHz = (hz: number) => hz >= 1000 ? `${Number((hz / 1000).toFixed(2))} kHz` : `${Number(hz.toFixed(2))} Hz`;
 export const db = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
