@@ -99,14 +99,16 @@ function statusText(check?: UpdateCheck): [string, string] {
 
 export function UpdateSection({ controller }: { controller: UpdateController }) {
   const view = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  const [label, description] = statusText(view.check);
+  const downloaded = !!view.check?.latest_version && view.download?.version === view.check.latest_version;
+  const [label, description] = downloaded
+    ? ["Ready to install", `Version ${view.check!.latest_version} is saved; see the file below.`] : statusText(view.check);
   return <PanelSection title="Updates">
     <PanelSectionRow><Field label={label} description={description} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" childrenContainerWidth="max" disabled={view.busy !== null}
       onClick={() => void controller.run("check")}>
       {view.busy === "check" ? "Checking GitHub…" : "Check for Updates"}
     </ButtonItem></PanelSectionRow>
-    {view.check?.update_available && view.check.download_available && <PanelSectionRow>
+    {view.check?.update_available && view.check.download_available && !downloaded && <PanelSectionRow>
       <ButtonItem layout="below" childrenContainerWidth="max" disabled={view.busy !== null}
         onClick={() => void controller.run("download")}>
         {view.busy === "download" ? "Downloading ZIP…" : `Download ${view.check.latest_version}`}

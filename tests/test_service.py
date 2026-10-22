@@ -255,6 +255,38 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.load()["working"]["bass"], 2)
         self.assertFalse(self.service.lock.locked())
 
+    async def test_repeated_cancellation_still_finishes_the_transaction(self):
+        await self.act("enable", enabled=True)
+        self.runtime.gate = asyncio.Event()
+        eq = flat_eq()
+        eq["bass"] = 3
+        task = asyncio.create_task(self.act("edit", eq=eq))
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+            task.cancel()
+        self.runtime.gate.set()
+        with self.assertRaises(asyncio.CancelledError): await task
+        await asyncio.sleep(0.01)
+        self.assertEqual(self.service.data["working"]["bass"], 3)
+        self.assertEqual(self.store.load()["working"]["bass"], 3)
+
+    async def test_status_answers_while_a_transaction_holds_the_lock(self):
+        async with self.service.lock:
+            self.assertEqual((await asyncio.wait_for(self.service.status(), 0.5))["revision"], self.service.revision)
+
+    async def test_monitor_pauses_after_unexpected_errors(self):
+        real_sleep, pauses = asyncio.sleep, []
+        async def tick(seconds):
+            pauses.append(seconds)
+            await real_sleep(0)
+        with patch.object(self.runtime, "wait_for_change", side_effect=RuntimeError("event stream broke")), \
+                patch("deckyeq.service.asyncio.sleep", side_effect=tick):
+            self.service.monitor.cancel()
+            self.service.monitor = asyncio.create_task(self.service._watch())
+            for _ in range(20):
+                await real_sleep(0)
+        self.assertIn(2, pauses)
+
     async def test_import_is_atomic_and_does_not_switch_playback(self):
         document = {"format": "deckyeq-bank", "version": 2, "presets": [
             {"name": "Good", "eq": flat_eq()}, {"name": "Bad", "eq": {}}]}

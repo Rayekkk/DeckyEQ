@@ -61,7 +61,7 @@ def main():
             restore(journal, pactl)
         child.terminate()
         try:
-            child.wait(3)
+            child.wait(2)  # Runtime waits longer (TERMINATE_SECONDS) before killing the group.
         except subprocess.TimeoutExpired:
             child.kill()
             child.wait()

@@ -30,7 +30,7 @@ A live equalizer, bass and treble controls, and your own presets inside Gaming M
 | **Output selection** | Apply EQ to your chosen output, with speaker-only bypass enabled by default |
 | **Normal volume control** | Sets the physical output to 100% before routing through EQ; keeps your listening volume on the virtual output |
 | **Compact QAM interface** | Native Decky sliders, dropdowns and full-width action buttons |
-| **Plugin updates** | Check GitHub for a newer release and download its verified installation ZIP to your Downloads folder |
+| **Plugin updates** | Check GitHub for a newer release and download its integrity-checked installation ZIP to your Downloads folder |
 
 ---
 
@@ -59,7 +59,7 @@ acceptance remain open. Other handhelds have not been validated. See the
 4. Choose **Install Plugin from ZIP** and select the archive.
 5. Open **DeckyEQ** in the Decky menu and turn on **Enable EQ**.
 
-The package is `artifacts/DeckyEQ-1.0.0.zip`, containing one `DeckyEQ` folder.
+The package is `artifacts/DeckyEQ-<version>.zip`, containing one `DeckyEQ` folder.
 If no suitable speaker output is selected automatically, choose one in **View → Output**.
 
 ---
@@ -183,7 +183,10 @@ presets without overwriting existing entries or changing playback automatically.
 Check your connection and retry later if GitHub reports a request limit. A release must
 contain a matching **DeckyEQ-X.Y.Z.zip** with trusted GitHub size and digest metadata.
 If a release changes between checking and downloading, check for updates again.
-Incomplete or unverified archives are not offered as installation files.
+Incomplete or unverified archives are not offered as installation files. The check proves the
+ZIP matches what GitHub reports for the release; the ZIP itself is not signed, so trust rests on
+the GitHub repository. Releases built by CI also carry a build-provenance attestation that can
+be checked with `gh attestation verify`.
 
 </details>
 

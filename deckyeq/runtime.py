@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import stat
 import time
 import uuid
@@ -24,7 +25,7 @@ EVENT_QUIET = 0.15  # One output switch emits a burst of events; act once it set
 AUDIO_EVENT = re.compile(rb"Event '[a-z]+' on (?:sink|server|card) ")
 START_SECONDS = 6  # PipeWire must expose the filter's controls within this time.
 START_POLL_SECONDS = 0.12
-TERMINATE_SECONDS = 3
+TERMINATE_SECONDS = 5  # Longer than worker.py's own 2 s wait for PipeWire to exit.
 STEP_DB = 1.5  # Larger gain changes are written in steps of about this size to avoid zipper noise,
 MAX_STEPS = 5  # in at most this many pw-cli writes.
 BASELINE_SECONDS = 15  # An edit may start from a readback this recent instead of a new pw-dump.
@@ -69,8 +70,6 @@ def normalize_sinks(items):
         if not isinstance(sink, dict):
             continue
         name = sink.get("name", "")
-        props = sink.get("properties")
-        props = props if isinstance(props, dict) else {}
         if not isinstance(name, str) or name == SINK_NAME:
             continue
         # Exclude EasyEffects/other virtual processors to avoid accidental double EQ.
@@ -79,8 +78,7 @@ def normalize_sinks(items):
         port = active_port(sink)
         speaker = "speaker" in port.lower() and not name.startswith("bluez")
         result.append({"name": name, "description": str(sink.get("description") or name),
-                       "index": sink.get("index"), "port": port, "speaker": speaker,
-                       "serial": str(props.get("object.serial", ""))})
+                       "port": port, "speaker": speaker})
     return result
 
 
@@ -483,8 +481,8 @@ class Runtime:
             raise EQError("PipeWire did not confirm the new EQ settings. The change was not saved.")
 
     async def apply(self, eq, max_age=0.0):
-        """Write and read back controls. Polling passes max_age to skip the costly pw-dump
-        while scan() still lists our sink and the last readback is recent and unchanged."""
+        """Write and read back controls. The monitor passes max_age: it skips the work while the
+        readback is younger than that and unchanged, so its 15 s heartbeat performs one pw-dump."""
         if not self.running:
             return
         expected = controls(eq)
@@ -583,8 +581,12 @@ class Runtime:
                 await asyncio.wait_for(self.process.wait(), TERMINATE_SECONDS)
             except asyncio.TimeoutError:
                 try:
-                    self.process.kill()
-                except ProcessLookupError:
+                    # The worker leads its own session; kill the whole group so PipeWire cannot linger.
+                    if hasattr(os, "killpg"):
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    else:
+                        self.process.kill()
+                except (ProcessLookupError, PermissionError):
                     pass
                 await self.process.wait()
         if self.reader:

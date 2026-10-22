@@ -221,7 +221,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_malformed_sink_properties_are_ignored(self):
         outputs = normalize_sinks([{"name": "alsa_output.speaker", "properties": ["bad"], "active_port": "speaker"}])
-        self.assertEqual(outputs[0]["serial"], "")
+        self.assertEqual(outputs[0]["name"], "alsa_output.speaker")
 
     def volume(self, sink):
         return [entry["value"] for entry in sink["volume"].values()]

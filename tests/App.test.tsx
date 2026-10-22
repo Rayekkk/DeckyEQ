@@ -131,3 +131,20 @@ it("opens the file picker again after an earlier, unrelated error", async () => 
   fireEvent.click(screen.getByRole("button", { name: "Import preset or bank…" }));
   await waitFor(() => expect(files.importFile).toHaveBeenCalled());
 });
+
+it("clears an old message when switching pages and shows the snapped frequency", async () => {
+  const { controller, engine } = await setup();
+  act(() => controller.reportError("A preset already uses that name."));
+  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "presets" } });
+  expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "eq" } });
+  fireEvent.click(screen.getByRole("switch", { name: "Edit filter type, frequency & width" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Exact frequency (Hz)" }), { target: { value: "20" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply exact frequency" }));
+  await act(async () => { await controller.flush(); });
+  fireEvent.change(screen.getByRole("textbox", { name: "Exact frequency (Hz)" }), { target: { value: "10" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply exact frequency" }));
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.state.working.bands[0].frequency).toBe(20);
+  expect((screen.getByRole("textbox", { name: "Exact frequency (Hz)" }) as HTMLInputElement).value).toBe("20");
+});

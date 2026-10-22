@@ -128,3 +128,16 @@ describe("failed writes", () => {
     h.controller.dispose();
   });
 });
+
+describe("disconnected actions", () => {
+  it("tells the user when an action cannot run", async () => {
+    const h = harness(); await h.controller.refresh();
+    vi.mocked(h.transport.status).mockRejectedValueOnce(new Error("backend gone"));
+    await h.controller.refresh();
+    h.controller.clearMessage();
+    const result = await h.controller.action("reset");
+    expect(result.ok).toBe(false);
+    expect(h.controller.getSnapshot().error).toContain("disconnected");
+    h.controller.dispose();
+  });
+});

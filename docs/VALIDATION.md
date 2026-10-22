@@ -9,17 +9,26 @@ not published releases. The public build includes the later audio and dropdown
 fixes. Its GitHub preparation and updater checks run locally; that prepared
 archive has not been installed on the device.
 
-## Unreleased hardening (not yet validated on a device)
+## 1.1.0 (unreleased, not yet validated on a device)
 
-- `npm run check` passes: 119 Python tests on Windows (13 POSIX/symlink tests
-  skip there; all 119 pass on Linux), 32 UI tests, the production build and
-  packaging.
-- Covered by tests with a protocol fake, not by hardware: bypass when the
-  physical output is chosen in Steam, the restore journal surviving an
-  interrupted stop, no takeover of Bluetooth playback on enable, idle polling
-  and retry backoff, the +24 dB manual boost cap, stable filter frequency
-  ranges and settings recovery from malformed values.
-- Hardware acceptance on the Legion Go is still required before release.
+The public update is numbered 1.1.0. The test device still runs the internal
+build 1.1.1, which the in-plugin updater treats as newer, so install 1.1.0 there
+from the ZIP (Decky → Developer → Install Plugin from ZIP).
+
+- `npm run check` passes: 138 Python tests (16 POSIX-only tests skip on
+  Windows; all 138 pass on Linux, including the PipeWire supervisor with real
+  processes), 41 UI tests including backend-generated contract and parity
+  fixtures, the production build and packaging.
+- Covered by tests with protocol fakes, not by hardware: per-device and per-port
+  volume restores across headphone plugs and Bluetooth reconnects, restore of
+  the user's volume when Decky dies, bypass when the physical output is chosen
+  in Steam, event-driven monitoring with polling fallback, no takeover of
+  Bluetooth playback on enable, the +24 dB manual boost cap, stable filter
+  frequency ranges, settings recovery from malformed values, and a frontend
+  contract fixture generated from the real backend snapshot.
+- Hardware acceptance on the Legion Go is still required before release:
+  headphone plug/unplug, Bluetooth reconnect, killing Decky during playback,
+  suspend/resume, PipeWire restart and CPU use with EQ on.
 
 ## Public 1.0.0 local preparation
 

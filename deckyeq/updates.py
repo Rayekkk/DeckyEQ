@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Rayekkk
 """Explicit release checks and verified downloads; never installs or executes them."""
 
+import errno
 import hashlib
 import json
 import os
@@ -505,6 +506,12 @@ class PluginUpdates:
             except Exception as error:
                 if isinstance(error, (zipfile.BadZipFile, KeyError)):
                     message = "The release ZIP is damaged or incomplete. Try again later."
+                elif isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    # O_NOFOLLOW refuses a linked Downloads folder, e.g. one moved to an SD card.
+                    message = ("Your Downloads folder is a link, for example to an SD card. For safety DeckyEQ only "
+                               "saves into a real folder in your home directory; download the ZIP from GitHub instead.")
+                elif isinstance(error, OSError) and error.errno in (errno.EACCES, errno.EPERM, errno.ENOSPC, errno.EROFS):
+                    message = "The Downloads folder cannot be written (permissions or free space). Check it and try again."
                 else:
                     message = (str(error) if isinstance(error, ValueError) else
                                "The release ZIP could not be downloaded safely. Check the connection and Downloads folder.")

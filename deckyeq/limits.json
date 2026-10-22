@@ -10,5 +10,6 @@
   "treble_frequency": 6000,
   "preamp": [-36, 12],
   "max_boost": 24,
-  "name_length": 64
+  "name_length": 64,
+  "flat_q": 1.4
 }

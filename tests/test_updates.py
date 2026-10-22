@@ -408,7 +408,9 @@ class DownloadFiles(_UpdateFixture):
         outside.mkdir()
         downloads = self.home / "Downloads"
         downloads.symlink_to(outside, target_is_directory=True)
-        self.assertFalse(self.do_download()["success"])
+        result = self.do_download()
+        self.assertFalse(result["success"])
+        self.assertIn("is a link", result["error"])  # Not "check the connection".
         self.assertEqual(list(outside.iterdir()), [])
         downloads.unlink()
         real_home = self.home

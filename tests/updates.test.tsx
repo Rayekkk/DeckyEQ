@@ -49,6 +49,8 @@ it("downloads the selected version once and retains progress across page remount
   await act(async () => pending.resolve({ success: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }));
   expect(screen.getByText("/home/deck/Downloads/DeckyEQ-1.0.1.zip")).toBeTruthy();
   expect(screen.getByText(/Install the ZIP through Decky/)).toBeTruthy();
+  expect(screen.getByText("Ready to install")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Download 1.0.1" })).toBeNull();
   reopened.unmount();
   render(<UpdateSection controller={controller} />);
   expect(screen.getByText("Version 1.0.1 downloaded")).toBeTruthy();

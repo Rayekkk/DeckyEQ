@@ -13,6 +13,7 @@ from .model import (EQError, FACTORY_IDS, MAX_PRESETS, create_preset, decode_imp
 
 VERSION = json.loads((Path(__file__).resolve().parent.parent / "package.json").read_text(encoding="utf-8"))["version"]
 VERIFY_SECONDS = 15  # Monitor heartbeat and full PipeWire readback interval; edits always verify.
+ERROR_PAUSE_SECONDS = 2  # After an unexpected monitor error, so a repeating failure cannot spin the loop.
 
 
 class Service:
@@ -79,6 +80,7 @@ class Service:
                     except Exception:
                         pass  # stop() keeps its journal; the next start restores routing.
                     self._failed(exc)
+                await asyncio.sleep(ERROR_PAUSE_SECONDS)
 
     async def _sync(self, data, explicit=False, force=False, max_age=0.0):
         """explicit: a user action, which resumes a manual bypass. force: Refresh, which also
@@ -148,8 +150,9 @@ class Service:
                 "export_directory": str(self.files.default_directory)}
 
     async def status(self):
-        async with self.lock:
-            return self.snapshot()
+        # No lock: snapshot() never awaits, so it cannot observe half of a commit, and the panel
+        # stays responsive while a start or stop holds the lock for seconds.
+        return self.snapshot()
 
     async def action(self, action, payload, revision):
         if self.closed:
@@ -159,7 +162,11 @@ class Service:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await task
+            while not task.done():  # Repeated cancellation must not reach the transaction either.
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
             raise
 
     async def _action(self, action, payload, revision):
@@ -314,4 +321,8 @@ class Service:
 
 
 AUDIO_KEYS = ("enabled", "working", "target", "speakers_only")
-HANDLERS = {name[4:]: handler for name, handler in vars(Service).items() if name.startswith("_do_")}
+# The RPC action names; renaming a handler must not silently change the frontend contract.
+HANDLERS = {"edit": Service._do_edit, "enable": Service._do_enable, "output": Service._do_output,
+            "select": Service._do_select, "save_as": Service._do_save_as, "save": Service._do_save,
+            "rename": Service._do_rename, "delete": Service._do_delete, "revert": Service._do_revert,
+            "reset": Service._do_reset, "import": Service._do_import}

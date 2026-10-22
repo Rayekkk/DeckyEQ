@@ -1,17 +1,19 @@
 name: Release DeckyEQ
-# Push a tag such as v1.1.0 to build, test and publish the installation ZIP from CI.
+# Push a tag such as v1.1.0. CI builds and tests the ZIP without write access, attests where it
+# was built, and creates a DRAFT release. Publish the draft after the hardware checks in
+# docs/VALIDATION.md; the in-plugin updater only sees published releases.
 on:
   push:
     tags: ["v*.*.*"]
 permissions:
   contents: read
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -19,11 +21,32 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
-      - run: npm ci
+      # No dependency install scripts run, except esbuild's binary check needed by Vitest.
+      - run: npm ci --ignore-scripts && npm rebuild esbuild
       - name: Tag must match the plugin version
         run: test "v$(node -p "require('./plugin.json').version")" = "$GITHUB_REF_NAME"
       - run: npm run check
-      - name: Publish the release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: artifacts/DeckyEQ-*.zip*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: artifacts
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: artifacts/DeckyEQ-*.zip
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/DeckyEQ-*.zip artifacts/DeckyEQ-*.zip.sha256 --title "DeckyEQ $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --draft --repo "$GITHUB_REPOSITORY" --title "DeckyEQ $GITHUB_REF_NAME" --generate-notes

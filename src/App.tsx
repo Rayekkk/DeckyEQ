@@ -7,6 +7,7 @@ import { Band, cloneEQ, db, EQ, FilterType, formatHz, limits, safeFrequency, Sna
 const [freqMin, freqMax] = limits.frequency, [stableMin, stableMax] = limits.stable_frequency;
 import { UpdateController, UpdateSection } from "./updates";
 
+const POLL_MS = 1800;  // Status refresh while the panel is visible.
 const phases: Record<string, string> = { active: "Live equalizer", off: "EQ off", bypassed: "Bypassed",
   waiting: "Waiting for output", error: "Paused", unavailable: "Unavailable" };
 const filterTypes: { data: FilterType; label: string }[] = [
@@ -45,7 +46,7 @@ export function EqualizerIcon() {
 }
 
 function BandLevels({ eq }: { eq: EQ }) {
-  return <svg className="deq-chart" viewBox="0 0 270 94" role="img" aria-label="Ten equalizer band gain levels">
+  return <svg className="deq-chart" viewBox="0 0 270 98" role="img" aria-label={`${eq.bands.length} equalizer band gain levels`}>
     <line x1="2" x2="268" y1="40" y2="40" stroke="#ffffff20" />
     <line x1="2" x2="268" y1="10" y2="10" stroke="#ffffff08" />
     <line x1="2" x2="268" y1="70" y2="70" stroke="#ffffff08" />
@@ -54,7 +55,7 @@ function BandLevels({ eq }: { eq: EQ }) {
       return <g key={i}>
         <rect x={i * 27 + 5} y={Math.min(y, 40)} width="17" height={Math.max(2, Math.abs(y - 40))}
           rx="2" fill={band.gain >= 0 ? "#73e3c0" : "#af9aeb"} />
-        <text x={i * 27 + 13.5} y="89" textAnchor="middle" fill="#91a1b2" fontSize="8">
+        <text x={i * 27 + 13.5} y="93" textAnchor="middle" fill="#91a1b2" fontSize="10">
           {band.frequency >= 1000 ? `${Number((band.frequency / 1000).toFixed(1))}k` : Math.round(band.frequency)}
         </text>
       </g>;
@@ -129,7 +130,11 @@ function EqPage({ page, openPresets }: { page: Page; openPresets(): void }) {
           description={`${formatHz(stableMin)} – ${formatHz(stableMax)}. 0 Hz and ${formatHz(limits.passthrough_frequency)}–${formatHz(freqMax)} are also accepted for compatibility with the original Go S preset.`}
           onChange={event => setFrequencyText(event.target.value.slice(0, 20))} /></PanelSectionRow>
         <PanelSectionRow><ActionButton disabled={locked || !validFrequency || exactFrequency === band.frequency}
-          onClick={() => bandChange(bandIndex, { frequency: safeFrequency(exactFrequency) })}>Apply exact frequency</ActionButton></PanelSectionRow>
+          onClick={() => {
+            const frequency = safeFrequency(exactFrequency);
+            setFrequencyText(String(frequency));  // Show a snapped value even when the band already had it.
+            bandChange(bandIndex, { frequency });
+          }}>Apply exact frequency</ActionButton></PanelSectionRow>
         <PanelSectionRow><SliderField label="Width · Q"
           description={band.type === "peaking" ? "Higher Q affects a narrower range." : "Higher Q adds resonance around the shelf transition."}
           value={band.q} min={limits.q[0]} max={limits.q[1]} step={0.1} showValue disabled={locked}
@@ -232,7 +237,7 @@ export function App({ controller, files, updates, visible = true }: { controller
   useEffect(() => {
     if (!visible) return;
     void controller.refresh();
-    const timer = setInterval(() => void controller.refresh(), 1800);
+    const timer = setInterval(() => void controller.refresh(), POLL_MS);
     return () => clearInterval(timer);
   }, [controller, visible]);
 
@@ -288,13 +293,14 @@ export function App({ controller, files, updates, visible = true }: { controller
       {preset.description && <div className="deq-small">{preset.description}</div>}
       {tab === "eq" && <BandLevels eq={state.working} />}
     </div>
-    {(view.error || audio.error) && <div className="deq-note deq-error" role="alert">{view.error || audio.error}</div>}
+    {view.error && <div className="deq-note deq-error" role="alert">{view.error}</div>}
+    {audio.error && audio.error !== view.error && <div className="deq-note deq-error" role="alert">{audio.error}</div>}
     {snapshot.warning && <div className="deq-note">{snapshot.warning}</div>}
     {view.note && <div className="deq-note" role="status">{view.note}</div>}
     <PanelSection>
       <PanelSectionRow><DropdownItem label="View" layout="below" childrenContainerWidth="max" selectedOption={tab}
         rgOptions={[{data: "eq", label: "Equalizer"}, {data: "presets", label: "Presets"}, {data: "output", label: "Output"}, {data: "about", label: "About"}]}
-        onChange={option => setTab(option.data)} /></PanelSectionRow>
+        onChange={option => { controller.clearMessage(); setTab(option.data); }} /></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Enable EQ" checked={state.enabled}
         description={state.enabled && audio.phase !== "active" ? "Enabled; waiting for a suitable output." : undefined}
         disabled={locked || (!audio.supported && !state.enabled)} onChange={enabled => void controller.action("enable", { enabled })} /></PanelSectionRow>

@@ -43,12 +43,12 @@ def frequency(value, legacy=False):
 def name(value):
     if (not isinstance(value, str) or not 1 <= len(value.strip()) <= LIMITS["name_length"] or
             any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
-        raise EQError("Preset names must contain 1–64 printable characters.")
+        raise EQError(f"Preset names must contain 1–{LIMITS['name_length']} printable characters.")
     return value.strip()
 
 
 def flat_eq():
-    return {"bands": [{"frequency": float(f), "gain": 0.0, "q": 1.4, "type": "peaking"} for f in FREQUENCIES],
+    return {"bands": [{"frequency": float(f), "gain": 0.0, "q": float(LIMITS["flat_q"]), "type": "peaking"} for f in FREQUENCIES],
             "bass": 0.0, "treble": 0.0, "preamp": 0.0, "auto_headroom": True}
 
 
@@ -152,7 +152,7 @@ def create_preset(state, title, eq):
     candidate, index = title, 2
     while candidate.casefold() in used:
         suffix = f" ({index})"
-        candidate = title[:64 - len(suffix)] + suffix
+        candidate = title[:LIMITS["name_length"] - len(suffix)] + suffix
         index += 1
     item = {"id": uuid.uuid4().hex, "name": candidate, "eq": validate_eq(eq)}
     state["presets"].append(item)
@@ -184,7 +184,7 @@ def decode_import(text):
     else:
         raise EQError("Choose a DeckyEQ preset or preset bank JSON file.")
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_PRESETS:
-        raise EQError("A preset bank must contain 1–64 presets.")
+        raise EQError(f"A preset bank must contain 1–{MAX_PRESETS} presets.")
     output = []
     for item in items:
         if not isinstance(item, dict):

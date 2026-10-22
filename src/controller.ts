@@ -1,6 +1,7 @@
 import { cloneEQ, EQ, Result, sameEQ, Snapshot, Transport, View } from "./types";
 import { headroom } from "./headroom";
 
+const EDIT_DEBOUNCE_MS = 80;  // Coalesce slider drags into one backend write.
 const text = (error: unknown) => error instanceof Error ? error.message : String(error);
 const UNCONFIRMED = "Your last change was not confirmed. The controls now show the sound DeckyEQ is using.";
 
@@ -56,7 +57,7 @@ export class Controller {
     const snapshot = this.optimistic(this.view.snapshot, eq);
     this.publish({ snapshot, saving: true, error: null, note: null });
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, 80);
+    this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, EDIT_DEBOUNCE_MS);
   };
 
   private optimistic(snapshot: Snapshot, eq: EQ): Snapshot {
@@ -98,8 +99,11 @@ export class Controller {
   }
 
   action = async (action: string, payload: Record<string, unknown> = {}): Promise<Result> => {
-    if (this.disposed || this.view.busy || !this.view.snapshot || !this.view.connected)
-      return { ok: false, error: "DeckyEQ is busy or disconnected." };
+    if (this.disposed || this.view.busy || !this.view.snapshot || !this.view.connected) {
+      const error = "DeckyEQ is busy or disconnected. Try again.";
+      if (!this.disposed && !this.view.busy) this.publish({ error });  // e.g. a dialog confirmed after a disconnect
+      return { ok: false, error };
+    }
     this.epoch++;
     this.publish({ busy: true, error: null, note: null });
     try {

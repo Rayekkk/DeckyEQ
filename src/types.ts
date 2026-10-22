@@ -32,7 +32,7 @@ import limits from "../deckyeq/limits.json";
 export { limits };
 export const frequencies = limits.frequencies;
 export const flatEQ = (): EQ => ({
-  bands: frequencies.map(frequency => ({ frequency, gain: 0, q: 1.4, type: "peaking" })),
+  bands: frequencies.map(frequency => ({ frequency, gain: 0, q: limits.flat_q, type: "peaking" })),
   bass: 0, treble: 0, preamp: 0, auto_headroom: true,
 });
 /** Mirrors model.frequency(): unstable float32 biquad ranges snap to the audible band. */
