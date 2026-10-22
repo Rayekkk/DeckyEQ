@@ -1,14 +1,13 @@
 import { expect, it } from "vitest";
-import { ALLOWANCE, headroom, MAX_BOOST, peakGain } from "../src/headroom";
+import { ALLOWANCE, headroom, peakGain } from "../src/headroom";
 import { flatEQ } from "../src/types";
 
 it("compensates the combined peak, not the sum of all boosts", () => {
-  const eq = flatEQ(); eq.bass = 6; eq.treble = 6; eq.limiter = false;
-  expect(headroom(eq).compensation).toBeCloseTo(-6.5, 2);
+  const eq = flatEQ(); eq.bass = 9; eq.treble = 9;
+  expect(peakGain(eq)).toBeCloseTo(9, 1);
+  expect(headroom(eq).compensation).toBeCloseTo(-(peakGain(eq) - ALLOWANCE), 6);
   eq.bass = 0; eq.treble = 0; eq.preamp = 8;
-  expect(headroom(eq).effective_preamp).toBeCloseTo(-0.5, 6);
-  eq.auto_headroom = false;
-  expect(headroom(eq)).toEqual({ compensation: 0, effective_preamp: 8 });
+  expect(headroom(eq).effective_preamp).toBe(8);  // A raised input level is kept.
 });
 
 it("counts a resonant shelf cut's overshoot", () => {
@@ -17,18 +16,15 @@ it("counts a resonant shelf cut's overshoot", () => {
   expect(peakGain(eq)).toBeGreaterThan(8);
 });
 
-it("caps extreme manual boost like the backend", () => {
+it("takes back only extreme EQ boost, whatever the old manual field says", () => {
   const eq = flatEQ(); eq.auto_headroom = false; eq.preamp = 12;
   for (const band of eq.bands) band.gain = 12;
-  const { compensation } = headroom(eq);
-  expect(eq.preamp + peakGain(eq) + compensation).toBeCloseTo(MAX_BOOST, 6);
+  expect(headroom(eq).compensation).toBeCloseTo(-(peakGain(eq) - ALLOWANCE), 6);
 });
 
-it("leaves moderate boosts to the limiter and counts widening", () => {
+it("leaves moderate boosts to the limiter and never lowers for width or boost", () => {
   const eq = flatEQ(); eq.bass = 5;
   expect(headroom(eq).compensation).toBe(0);
-  eq.bass = 9;
-  expect(headroom(eq).compensation).toBeCloseTo(-(peakGain(eq) - ALLOWANCE), 6);
-  eq.bass = 0; eq.width = 2; eq.limiter = false;
-  expect(headroom(eq).compensation).toBeCloseTo(-(20 * Math.log10(2) + 0.5), 6);  // L = -R doubles.
+  eq.bass = 0; eq.width = 2; eq.preamp = 12;
+  expect(headroom(eq, 12).compensation).toBe(0);
 });

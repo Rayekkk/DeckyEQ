@@ -5,8 +5,17 @@ import { Controller } from "./controller";
 import { Result, Snapshot } from "./types";
 import { UpdateCheck, UpdateController, UpdateDownload } from "./updates";
 
-const status = callable<[], Snapshot>("get_status");
-const perform = callable<[string, Record<string, unknown>, number], Result>("perform");
+// A backend that never answers must not lock the panel: the controller treats a timeout like a
+// lost connection, reports the change as not confirmed and polls again.
+const within = <T,>(seconds: number, request: Promise<T>) => new Promise<T>((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("DeckyEQ did not answer in time.")), seconds * 1000);
+  request.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+});
+const getStatus = callable<[], Snapshot>("get_status");
+const performAction = callable<[string, Record<string, unknown>, number], Result>("perform");
+const status = () => within(10, getStatus());
+const perform = (action: string, payload: Record<string, unknown>, revision: number) =>
+  within(45, performAction(action, payload, revision));  // Long enough for a filter rebuild.
 const checkUpdates = callable<[], UpdateCheck>("updates_check");
 const downloadUpdate = callable<[string], UpdateDownload>("updates_download");
 // Decky rejects the picker promise when the user closes it; that is not an error.

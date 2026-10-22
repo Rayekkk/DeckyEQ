@@ -46,7 +46,7 @@ def metadata(payload=None, version=NEW):
     return {
         "tag_name": tag, "draft": False, "prerelease": False,
         "html_url": f"{updates.RELEASE_BASE}/tag/{tag}",
-        "assets": [{"name": name, "state": "uploaded", "size": len(payload),
+        "assets": [{"name": name, "state": "uploaded", "size": len(payload), "uploader": {"login": updates.RELEASE_UPLOADER},
                     "browser_download_url": f"{updates.RELEASE_BASE}/download/{tag}/{name}",
                     "digest": "sha256:" + hashlib.sha256(payload).hexdigest()}],
     }
@@ -137,7 +137,7 @@ class UpdateChecks(_UpdateFixture):
         for field, value in (("name", "source.zip"), ("digest", None), ("digest", "sha256:bad"),
                              ("size", 0), ("size", True), ("size", updates.MAX_DOWNLOAD + 1),
                              ("browser_download_url", "https://github.com/another/repo/file.zip"),
-                             ("state", "open")):
+                             ("state", "open"), ("uploader", {"login": "Rayekkk"}), ("uploader", None)):
             mutations.append(lambda data, field=field, value=value: data["assets"][0].update({field: value}))
         for mutate in mutations:
             data = metadata()

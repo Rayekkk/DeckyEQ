@@ -9,17 +9,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from deckyeq.graph import SINK_NAME, PLAYBACK_NAME, controls
-from deckyeq.model import EQError, flat_eq as factory_flat_eq
+from deckyeq.graph import LEVEL, SINK_NAME, PLAYBACK_NAME, controls, neutral
+from deckyeq.model import EQError, ToolError, flat_eq as factory_flat_eq
 from deckyeq.runtime import Runtime, UNITY_VOLUME, environment, normalize_sinks, sink_level
 
 
 def flat_eq():
-    # Without the limiter, automatic headroom moves the input level with every boost; the level
-    # ordering and ramps below rely on that.
-    eq = factory_flat_eq()
-    eq["limiter"] = False
-    return eq
+    return factory_flat_eq()
 
 
 class Process:
@@ -68,6 +64,13 @@ class AudioServer(Runtime):
         self.state = "running"
         self.unlinked = False  # True: WirePlumber never inserts the filter (pre-0.5).
         self.stale = None  # Props a suspended node keeps reporting.
+        self.silent = set()  # Tools that time out, like a pw-dump while a game loads.
+
+    async def _spawn(self, eq, boost):
+        # Like PipeWire: the new graph starts with the controls its configuration names.
+        graph = json.loads(self.config.read_text(encoding="utf-8"))["context.modules"][-1]["args"]["filter.graph"]
+        self.actual = {f"{node['name']}:{key}": value for node in graph["nodes"] for key, value in node["control"].items()}
+        await super()._spawn(eq, boost)
 
     def set_port(self, name, port):
         """Like WirePlumber: remember the current route's volume and restore the new route's."""
@@ -79,6 +82,8 @@ class AudioServer(Runtime):
 
     async def run(self, tool, *args, **_):
         self.commands.append((tool, *args))
+        if tool in self.silent:
+            raise ToolError("Could not communicate with the desktop audio service.")
         live = self.process is not None and self.process.returncode is None
         if tool == "pw-dump":
             reported = self.stale if self.state == "suspended" else self.actual
@@ -156,7 +161,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = self.mock_spawn.call_args
         self.assertEqual(args[:2], ("/usr/bin/python3", "-I"))
         self.assertTrue(args[2].endswith("worker.py"))
-        self.assertEqual(args[5], "deckyeq.conf")
+        self.assertEqual(args[4:], ("/usr/bin/pipewire", "-c", "deckyeq.conf"))
         self.assertEqual(kwargs["env"]["PIPEWIRE_CONFIG_DIR"], str(self.runtime.directory))
         self.assertTrue(kwargs["start_new_session"])
         self.assertNotIn("shell", kwargs)
@@ -186,19 +191,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_live_controls_update_without_restarting_graph(self):
         await self.start()
+        self.runtime.commands.clear()  # Not the fade-in after start.
         process = self.runtime.process
         eq = flat_eq()
-        eq["bass"] = 6
+        eq["bass"] = 9  # Above the 6 dB allowance: the level drops by the excess.
         await self.runtime.apply(eq)
-        self.assertEqual(self.runtime.actual["bass_l:Gain"], 6)
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 9)
         self.assertIs(self.runtime.process, process)
         self.mock_spawn.assert_called_once()
         commands = [c for c in self.runtime.commands if c[0] == "pw-cli"]
         first = json.loads(commands[0][4])["params"]
-        self.assertEqual(first[0], "level_l:Mult")
-        self.assertLess(first[1], 1)
+        self.assertEqual(first, [LEVEL, controls(eq)[LEVEL]])  # The level drops first (in dB).
+        self.assertLess(first[1], 0)
         self.assertEqual(json.loads(commands[-1][4])["params"],
-                         [item for pair in controls(eq).items() for item in pair])
+                         [item for pair in controls(eq).items() if pair[0] != LEVEL for item in pair])
 
     async def test_readback_failure_is_reported(self):
         await self.start()
@@ -207,7 +213,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(EQError, "confirm"): await self.runtime.apply(eq)
         self.assertIsNone(self.runtime.last_controls)  # Unknown now: the next apply reads back.
 
-    async def test_type_changes_disable_previous_filter_without_restart(self):
+    async def test_type_changes_are_live_without_a_restart(self):
+        # Also what switching between presets with different filter types does: never a rebuild,
+        # which would let unequalized audio through for a moment.
         await self.start()
         process = self.runtime.process
         eq = flat_eq()
@@ -223,7 +231,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         boosted = flat_eq(); boosted["bass"] = 6
         await self.runtime.apply(boosted)
-        protected_level = self.runtime.actual["level_l:Mult"]
+        protected_level = self.runtime.actual[LEVEL]
         self.runtime.reject_keys.add("bass_l:Gain")
         self.runtime.commands.clear()
         with self.assertRaisesRegex(EQError, "confirm"):
@@ -233,10 +241,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             if command[0] == "pw-cli":
                 params = json.loads(command[4])["params"]
                 values = dict(zip(params[::2], params[1::2]))
-                self.assertLessEqual(values.get("level_l:Mult", protected_level), protected_level)
+                self.assertLessEqual(values.get(LEVEL, protected_level), protected_level)
 
     async def test_lost_node_not_hidden_by_cached_settings(self):
         await self.start()
+        self.runtime.verified_at -= 20  # Past the cache window: the next apply reads back.
         self.runtime.drop_node = True
         with self.assertRaises(EQError): await self.runtime.apply(flat_eq())
 
@@ -305,6 +314,58 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.journal.exists())
         await self.start()  # Never blocked by it.
 
+    async def test_a_tool_that_does_not_answer_is_reported_as_such(self):
+        # The monitor only tolerates ToolError; JSON tools must not turn it into "invalid data".
+        await self.start()
+        self.runtime.silent.add("pw-dump")
+        with self.assertRaises(ToolError): await self.runtime.dump_node(70)
+        self.runtime.silent = {"pactl"}
+        with self.assertRaises(ToolError): await self.runtime.scan()
+
+    async def test_a_legacy_restore_that_met_a_hiccup_is_kept(self):
+        speaker = self.runtime.sinks[0]
+        self.set_volume(speaker, UNITY_VOLUME)
+        level = {"values": [20000, 20000], "mute": False}
+        self.runtime.journal.write_text(json.dumps({"version": 3, "pending": [
+            {"target": "alsa_output.speaker", "port": "", "force": True, "level": level}]}), encoding="utf-8")
+        with patch.object(self.runtime, "_set_level", side_effect=ToolError("no answer")):
+            await self.runtime.recover()
+        self.assertTrue(self.runtime.journal.exists())  # Owed still; tried again at the next chance.
+        await self.runtime.recover()
+        self.assertEqual(self.volume(speaker), [20000, 20000])
+        self.assertFalse(self.runtime.journal.exists())
+
+    async def test_odd_audio_objects_are_skipped(self):
+        self.assertIsNone(self.runtime._own_node([{"type": "PipeWire:Interface:Node", "id": 1, "info": None}]))
+        self.assertFalse(self.runtime._linked([{"type": "PipeWire:Interface:Link", "info": None}]))
+
+    async def test_a_busy_event_stream_still_lets_the_monitor_act(self):
+        subscriber = Subscriber()
+        self.mock_spawn.side_effect = lambda *a, **kw: subscriber
+        self.addAsyncCleanup(self.runtime.close_events)
+        async def chatter():
+            while True:  # Unrelated events every 50 ms, forever.
+                subscriber.stdout.feed_data(b"Event 'change' on client #9\n")
+                await asyncio.sleep(0.05)
+        noise = asyncio.create_task(chatter())
+        self.addCleanup(noise.cancel)
+        subscriber.stdout.feed_data(b"Event 'change' on card #2\n")
+        started = time.monotonic()
+        self.assertTrue(await self.runtime.wait_for_change(5))
+        self.assertLess(time.monotonic() - started, 2)
+
+    async def test_glide_steps_never_visit_unstable_frequencies(self):
+        await self.start()
+        eq = flat_eq()
+        eq["bands"][0].update(frequency=20.0, gain=6)
+        await self.runtime.apply(eq)
+        self.runtime.commands.clear()
+        eq["bands"][0]["frequency"] = 20000.0
+        await self.runtime.apply(eq)
+        freqs = [dict(zip(p[::2], p[1::2]))["band0_l:Freq"] for p in
+                 (json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli")]
+        self.assertTrue(all(20 <= f <= 20000 for f in freqs))
+
     async def test_version_2_journal_is_still_restored(self):
         speaker = self.runtime.sinks[0]
         self.set_volume(speaker, UNITY_VOLUME)
@@ -330,10 +391,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         eq = flat_eq()
         eq["bass"] = 2
         await self.runtime.apply(eq)
-        # One readback of just our node; the level only falls here, so no rise ramp:
-        # one level write plus the interpolation steps for a 2 dB change.
+        # One readback of just our node; a 2 dB boost moves no level: two interpolation steps.
         self.assertEqual([c for c in self.runtime.commands if c[0] == "pw-dump"], [("pw-dump", "70")])
-        self.assertEqual(sum(c[0] == "pw-cli" for c in self.runtime.commands), 3)
+        self.assertEqual(sum(c[0] == "pw-cli" for c in self.runtime.commands), 2)
         self.assertEqual(self.runtime.actual["bass_l:Gain"], 2)
         self.runtime.reject_controls = True
         eq["bass"] = 4
@@ -349,17 +409,41 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         started = time.monotonic()
         self.assertTrue(await self.runtime.wait_for_change(5))
         self.assertLess(time.monotonic() - started, 1)
-        self.assertEqual(self.mock_spawn.call_args.args[1:], ("subscribe",))
+        self.assertEqual(self.mock_spawn.call_args.args[-2:], ("/usr/bin/pactl", "subscribe"))
+        self.assertTrue(str(self.mock_spawn.call_args.args[2]).endswith("worker.py"))  # Ends with the plugin.
         self.assertEqual(self.mock_spawn.call_count, 1)  # One long-lived subscription.
         subscriber.stdout.feed_eof()
         with patch("deckyeq.runtime.POLL_SECONDS", 0):
             self.assertTrue(await self.runtime.wait_for_change(5))
         self.assertIsNone(self.runtime.subscriber)
 
+    async def test_own_sink_changes_are_ignored_but_its_removal_is_not(self):
+        subscriber = Subscriber()
+        self.mock_spawn.side_effect = lambda *a, **kw: subscriber
+        self.addAsyncCleanup(self.runtime.close_events)
+        self.runtime.sink_index = 3
+        subscriber.stdout.feed_data(b"Event 'change' on sink #3\n")
+        self.assertFalse(await self.runtime.wait_for_change(0.3))  # An edit or a suspend of our own.
+        subscriber.stdout.feed_data(b"Event 'remove' on sink #3\n")
+        self.assertTrue(await self.runtime.wait_for_change(5))  # The filter crashed.
+
+    async def test_a_restart_waits_out_our_own_lingering_sink(self):
+        await self.start()
+        self.runtime.virtual["properties"] = {"deckyeq.owner": self.runtime.owner}
+        self.runtime.foreign = True  # pipewire-pulse still lists our previous filter.
+        with patch("deckyeq.runtime.OWN_STALE_SECONDS", 0.3):
+            await self.start()  # E.g. EQ toggled quickly, or PipeWire restarted: not "another" equalizer.
+        self.assertEqual(self.mock_spawn.call_count, 2)
+        self.runtime.virtual["properties"] = {"deckyeq.owner": "someone-else"}
+        await self.runtime.stop()
+        with self.assertRaisesRegex(EQError, "already active"):
+            await self.start()
+
     async def test_suspended_filter_takes_writes_and_is_verified_once_audio_flows(self):
         await self.start()
         await self.runtime.scan()
         self.runtime.state, self.runtime.stale = "suspended", copy.deepcopy(self.runtime.actual)
+        self.runtime.verified_at -= 20  # Read the node afresh: it reports "suspended" now.
         eq = flat_eq()
         eq["bass"] = 6
         await self.runtime.apply(eq)  # Stale readback while suspended is not an error.
@@ -371,6 +455,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.state = "running"
         await self.runtime.apply(eq, max_age=15)
         self.assertGreater(self.runtime.verified_at, 0.0)
+
+    async def test_large_frequency_jumps_move_in_half_octave_steps(self):
+        await self.start()
+        eq = flat_eq()
+        eq["bands"][4].update(gain=6)
+        await self.runtime.apply(eq)
+        self.runtime.commands.clear()
+        eq["bands"][4]["frequency"] = 4000.0  # 500 Hz -> 4 kHz: three octaves.
+        await self.runtime.apply(eq)
+        freqs = [dict(zip(p[::2], p[1::2]))["band4_l:Freq"] for p in
+                 (json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli")]
+        self.assertEqual(len(freqs), 5)  # Capped at MAX_STEPS writes.
+        self.assertTrue(all(b / a < 1.6 for a, b in zip([500.0] + freqs, freqs)))  # Geometric, ~0.6 octave.
+        self.assertAlmostEqual(freqs[-1], 4000.0)
 
     async def test_rollback_after_a_failed_write_really_restores_the_sound(self):
         await self.start()
@@ -397,51 +495,37 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.runtime.apply(eq, max_age=15)
         self.assertIn("pw-dump", [c[0] for c in self.runtime.commands])
 
-    async def test_level_rise_is_ramped_after_the_filters_are_confirmed(self):
+    async def test_level_rises_only_after_the_filters_are_confirmed(self):
         await self.start()
         await self.runtime.scan()
         boosted = flat_eq()
         boosted["bass"] = 9  # Auto headroom lowers the level by ~9.5 dB.
         await self.runtime.apply(boosted)
         self.runtime.commands.clear()
-        await self.runtime.apply(flat_eq())  # Level back up by ~9.5 dB.
-        levels = [json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli"]
-        level_only = [p for p in levels if p[::2] == ["level_l:Mult", "level_r:Mult"]]
-        self.assertTrue(all(p[1] == p[3] for p in level_only))  # Both channels move together.
-        self.assertGreater(len(level_only), 1)
-        self.assertEqual(level_only, sorted(level_only, key=lambda p: p[1]))
-        self.assertEqual(self.runtime.actual["level_l:Mult"], 1)
-
-    async def test_unequal_channel_levels_are_lowered_together_first(self):
-        await self.start()
-        await self.runtime.scan()
-        self.runtime.actual["level_r:Mult"] = 0.5  # E.g. a write interrupted between the channels.
-        self.runtime.last_controls = None
-        self.runtime.commands.clear()
-        eq = flat_eq()
-        eq["treble"] = 1
-        await self.runtime.apply(eq)
+        await self.runtime.apply(flat_eq())  # Level back up by ~9.5 dB; the stage glides it.
+        tools = [c[0] for c in self.runtime.commands]
         writes = [json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli"]
-        self.assertEqual(writes[0], ["level_l:Mult", 0.5, "level_r:Mult", 0.5])
-        expected = controls(eq)
-        self.assertEqual(self.runtime.actual["level_l:Mult"], self.runtime.actual["level_r:Mult"])
-        self.assertAlmostEqual(self.runtime.actual["level_l:Mult"], expected["level_l:Mult"])
+        self.assertEqual(writes[-1], [LEVEL, 0.0])
+        self.assertTrue(all(LEVEL not in w for w in writes[:-1]))
+        self.assertEqual(tools[-3:], ["pw-dump", "pw-cli", "pw-dump"])  # Confirmed, raised, confirmed.
 
-    async def test_the_limiter_leads_a_boost_up_and_trails_it_down(self):
-        await self.start()  # These tests run with the preset limiter off.
-        await self.runtime.scan()
-        boosted = flat_eq()
-        boosted["bass"] = 6  # Large enough for several interpolation steps.
-        for boost, expected_limit in ((6.0, 1.0), (0.0, 0.0)):
-            self.runtime.commands.clear()
-            await self.runtime.apply(boosted if boost else flat_eq(), boost=boost)
-            writes = [dict(zip(p[::2], p[1::2])) for p in
-                      (json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli")]
-            stepped = [w for w in writes if "stage:limit" in w]
-            self.assertGreater(len(stepped), 2)
-            self.assertTrue(all(w["stage:limit"] == 1.0 for w in stepped[:-1]))  # On while anything moves.
-            self.assertEqual(stepped[-1]["stage:limit"], expected_limit)
-            self.assertEqual(self.runtime.actual["stage:gain"], boost)
+    async def test_start_and_stop_pass_through_a_neutral_filter(self):
+        # Linked in neutral and moved to the settings in steps; moved back before it ends. So the
+        # moment WirePlumber links it in or out of the playback path makes no audible jump.
+        graph = lambda: json.loads(self.runtime.config.read_text(encoding="utf-8"))["context.modules"][-1]["args"]["filter.graph"]
+        eq = flat_eq()
+        eq.update(bass=6, preamp=-3)
+        await self.runtime.start(eq, "alsa_output.speaker", 3.0)
+        self.assertEqual(next(n for n in graph()["nodes"] if n["name"] == "bass_l")["control"]["Gain"], 0.0)
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 6)
+        self.assertEqual(self.runtime.actual["stage:gain"], 3.0)
+        self.runtime.commands.clear()
+        await self.runtime.stop()
+        writes = [dict(zip(p[::2], p[1::2])) for p in
+                  (json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli")]
+        self.assertGreater(len(writes), 1)  # In steps.
+        self.assertTrue(all(writes[-1][k] == v for k, v in neutral().items() if k in writes[-1] and k != LEVEL))
+        self.assertEqual(self.runtime.actual[LEVEL], 0.0)
 
     async def test_start_refuses_without_the_audio_stage(self):
         self.runtime.stage_library = Path(self.runtime.directory) / "missing.so"
@@ -464,6 +548,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_external_control_drift_repaired(self):
         await self.start()
+        self.runtime.verified_at -= 20  # Past the cache window, as for the monitor's heartbeat.
         self.runtime.actual["band3_l:Gain"] = 3
         await self.runtime.apply(flat_eq())
         self.assertEqual(self.runtime.actual["band3_l:Gain"], 0)

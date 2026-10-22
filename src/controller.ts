@@ -120,6 +120,7 @@ export class Controller {
       else this.publish({ note: result.path ? `Exported to ${result.path}` : result.message || null });
       return result;
     } catch (error) {
+      this.unconfirmed = true;  // The next successful poll must still say the action was not confirmed.
       this.publish({ error: text(error), connected: false });
       return { ok: false, error: text(error) };
     } finally { this.publish({ busy: false }); }

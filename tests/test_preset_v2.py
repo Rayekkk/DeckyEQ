@@ -65,21 +65,18 @@ class OriginalPresetTests(unittest.TestCase):
         self.assertEqual([b["gain"] for b in eq["bands"]], [-10, -4, 5, 5, -5, -5, -5, -5, 0, 0])
         self.assertTrue(all(b["q"] == 1 for b in eq["bands"]))
         values = controls(eq)
-        self.assertAlmostEqual(values["level_l:Mult"], 10 ** (8 / 20))
-        self.assertEqual(headroom(eq)["compensation"], 0)
+        # +8 dB input, minus the 0.6 dB by which its combined filter peak (6.6 dB) passes the allowance.
+        self.assertAlmostEqual(values["stage:level"], 8 + headroom(eq)["compensation"])
+        self.assertAlmostEqual(headroom(eq)["compensation"], -0.61, places=2)
         self.assertEqual(values["band0_low_l:Gain"], -10)
         self.assertEqual(values["band5_high_l:Gain"], -5)
-        self.assertEqual(values["band0_l:Gain"], 0)
+        self.assertEqual(values["band0_l:Gain"], 0)  # The slot's inactive bell.
         self.assertEqual(values["band5_l:Gain"], 0)
 
-    def test_positive_preamp_is_compensated_only_when_requested(self):
+    def test_a_raised_input_level_is_kept(self):
         eq = flat_eq()
-        eq["preamp"] = 8  # With the limiter, the input level is deliberate gain: kept.
+        eq["preamp"] = 8  # The Go S original's +8 dB: deliberate gain, guarded by the limiter.
         self.assertEqual(headroom(eq), {"compensation": 0.0, "effective_preamp": 8.0})
-        eq["limiter"] = False
-        self.assertEqual(headroom(eq), {"compensation": -8.5, "effective_preamp": -0.5})
-        eq["auto_headroom"] = False
-        self.assertEqual(headroom(eq), {"compensation": 0, "effective_preamp": 8})
 
     def test_filter_response_matches_the_filter_definitions(self):
         self.assertAlmostEqual(response_db("peaking", 1000, 1.4, 6, [1000])[0], 6, places=6)
@@ -92,15 +89,14 @@ class OriginalPresetTests(unittest.TestCase):
         # Frequencies PipeWire clamps to 0 Hz or Nyquist become constant gains.
         self.assertEqual(response_db("lowshelf", 48000, 1, 4, [100]), [4])
         self.assertEqual(response_db("peaking", 40000, 1, 4, [100]), [0])
-    def test_manual_headroom_caps_extreme_boost(self):
+    def test_extreme_boost_is_taken_back_above_the_allowance(self):
+        from deckyeq.graph import ALLOWANCE
         eq = flat_eq()
-        eq.update(auto_headroom=False, preamp=12)
+        eq.update(auto_headroom=False, preamp=12)  # The old "manual" field changes nothing now.
         for band in eq["bands"]:
             band["gain"] = 12
-        compensation = headroom(eq)["compensation"]
-        self.assertLess(compensation, 0)
-        from deckyeq.graph import MAX_BOOST
-        self.assertAlmostEqual(eq["preamp"] + peak_gain(eq) + compensation, MAX_BOOST, places=3)
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=3)
+        self.assertAlmostEqual(headroom(eq)["effective_preamp"], 12 - (peak_gain(eq) - ALLOWANCE), places=3)
 
     def test_peak_matches_a_dense_brute_force_scan(self):
         import random

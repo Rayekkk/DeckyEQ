@@ -133,7 +133,8 @@
           "maximum": 12
         },
         "auto_headroom": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Kept for compatibility; DeckyEQ 1.1 always applies automatic headroom."
         },
         "width": {
           "type": "number",
@@ -143,7 +144,7 @@
         },
         "limiter": {
           "type": "boolean",
-          "description": "Look-ahead peak limiter. Optional, default true."
+          "description": "Kept for compatibility; DeckyEQ 1.1 ignores it (its limiter always runs). Optional, default true."
         }
       }
     }

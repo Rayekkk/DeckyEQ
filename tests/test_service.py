@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from deckyeq.graph import SINK_NAME
-from deckyeq.model import EQError, flat_eq, export_document, initial_state
+from deckyeq.model import EQError, NodeGone, ToolError, flat_eq, export_document, initial_state
 from deckyeq.service import Service
 from deckyeq.storage import Store, PresetFiles
 
@@ -42,8 +42,8 @@ class FakeRuntime:
         self.eq, self.boost = copy.deepcopy(eq), boost
         if self.gate: await self.gate.wait()
         if self.fail_next:
-            self.fail_next = False
-            raise EQError("Simulated readback mismatch")
+            failure, self.fail_next = self.fail_next, False
+            raise failure if isinstance(failure, Exception) else EQError("Simulated readback mismatch")
     async def stop(self):
         self.events.append("stop")
         self.process = self.target = None
@@ -177,6 +177,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.service._save_draft()
         self.assertIn("could not be saved", self.service.snapshot()["warning"])
         self.assertEqual(self.runtime.eq["bass"], 4)
+        await self.service.close()  # Unloading tries again, although no save was pending any more.
+        self.assertEqual(self.store.load()["working"]["bass"], 4)
         self.service._save_draft()
         self.assertIsNone(self.service.snapshot()["warning"])
 
@@ -197,7 +199,168 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             delays.append(round(self.service.retry_at - time.monotonic()))
         self.assertEqual(delays, [8, 16, 32, 60, 60, 60])
         await self.act("enable", enabled=True)
+        # Running again, but a filter that keeps dying must keep its backoff for a while.
+        self.assertEqual((self.service.phase, self.service.retry_at, self.service.failures), ("active", 0, 6))
+        self.service.failed_at -= 61
+        await self.act("refresh")
         self.assertEqual(self.service.failures, 0)
+
+    async def run_monitor(self, loops=30):
+        """Runs the real monitor with instant heartbeats and sleeps."""
+        real_sleep = asyncio.sleep
+        async def tick(*_): await real_sleep(0)
+        async def heartbeat(_):
+            await real_sleep(0)
+            return False
+        with patch.object(self.runtime, "wait_for_change", side_effect=heartbeat), \
+                patch("deckyeq.service.asyncio.sleep", side_effect=tick):
+            self.service.monitor.cancel()
+            self.service.monitor = asyncio.create_task(self.service._watch())
+            for _ in range(loops):
+                await real_sleep(0)
+            self.service.monitor.cancel()
+
+    async def test_a_tool_hiccup_keeps_the_filter_running(self):
+        await self.act("enable", enabled=True)
+        self.runtime.fail_next = ToolError("pw-dump: timed out")
+        await self.run_monitor()
+        self.assertNotIn("stop", self.runtime.events)
+        self.assertEqual((self.service.phase, self.service.error, self.service.tool_errors), ("active", None, 0))
+
+    async def test_a_restart_found_by_the_heartbeat_rebuilds_the_filter(self):
+        await self.act("enable", enabled=True)
+        starts = self.runtime.events.count("start")
+        self.runtime.fail_next = NodeGone("DeckyEQ's live audio node is unavailable.")
+        await self.run_monitor()
+        self.assertEqual(self.runtime.events.count("start"), starts + 1)
+        self.assertEqual((self.service.phase, self.service.error), ("active", None))
+
+    async def test_the_heartbeat_keeps_the_volume_boost(self):
+        await self.act("enable", enabled=True)
+        await self.act("edit", eq=self.service.data["working"], boost=6)
+        self.runtime.boost = None
+        await self.run_monitor()
+        self.assertEqual(self.runtime.boost, 6.0)
+
+    async def test_status_reports_the_applied_headroom(self):
+        from deckyeq.graph import headroom
+        eq = flat_eq()
+        eq.update(bass=9)
+        await self.act("edit", eq=eq, boost=6)
+        audio = self.service.snapshot()["audio"]
+        self.assertEqual(audio["compensation"], headroom(eq, 6)["compensation"])
+        self.assertLess(audio["compensation"], 0)
+
+    async def test_an_output_change_met_by_a_hiccup_is_not_lost(self):
+        # Headphones plugged in, then the rescan times out once: the bypass must still follow.
+        await self.act("enable", enabled=True)
+        self.runtime.outputs[0] = {**self.runtime.outputs[0], "speaker": False, "port": "analog-output-headphones"}
+        real_sleep = asyncio.sleep
+        events = iter([True] + [False] * 50)
+        async def wait(_):
+            await real_sleep(0)
+            return next(events)
+        async def tick(*_): await real_sleep(0)
+        scans = {"n": 0}
+        real_scan = self.runtime.scan
+        async def scan():
+            scans["n"] += 1
+            if scans["n"] == 1:
+                raise ToolError("pactl: timed out")
+            return await real_scan()
+        with patch.object(self.runtime, "wait_for_change", side_effect=wait), \
+                patch.object(self.runtime, "scan", side_effect=scan), \
+                patch("deckyeq.service.asyncio.sleep", side_effect=tick):
+            self.service.monitor.cancel()
+            self.service.monitor = asyncio.create_task(self.service._watch())
+            for _ in range(40):
+                await real_sleep(0)
+            self.service.monitor.cancel()
+        self.assertEqual(self.service.phase, "bypassed")
+
+    async def test_a_hiccup_while_eq_is_off_shows_no_error(self):
+        self.runtime.fail_next = None
+        with patch.object(self.runtime, "scan", side_effect=ToolError("pactl: timed out")):
+            real_sleep = asyncio.sleep
+            async def tick(*_): await real_sleep(0)
+            async def event(_):
+                await real_sleep(0)
+                return True
+            with patch.object(self.runtime, "wait_for_change", side_effect=event), \
+                    patch("deckyeq.service.asyncio.sleep", side_effect=tick):
+                self.service.monitor.cancel()
+                self.service.monitor = asyncio.create_task(self.service._watch())
+                for _ in range(4):
+                    await real_sleep(0)
+                self.service.monitor.cancel()
+        self.assertEqual((self.service.phase, self.service.error), ("off", None))
+
+    async def test_a_slider_edit_after_a_pipewire_restart_is_applied(self):
+        await self.act("enable", enabled=True)
+        starts = self.runtime.events.count("start")
+        self.runtime.fail_next = NodeGone("DeckyEQ's live audio node is unavailable.")
+        eq = flat_eq()
+        eq["bass"] = 3
+        self.assertTrue((await self.act("edit", eq=eq))["ok"])
+        self.assertEqual(self.runtime.events.count("start"), starts + 1)
+        self.assertEqual(self.runtime.eq["bass"], 3)
+
+    async def test_a_full_save_clears_an_old_draft_warning(self):
+        eq = flat_eq()
+        eq["bass"] = 2
+        await self.act("edit", eq=eq)
+        with patch.object(self.store, "save", side_effect=OSError("Disk full")):
+            self.service._save_draft()
+        self.assertIsNotNone(self.service.snapshot()["warning"])
+        await self.act("select", id="go-s-original")  # Saved at once, with everything.
+        self.assertIsNone(self.service.snapshot()["warning"])
+
+    async def test_without_audio_support_settings_still_change(self):
+        self.runtime.supported, self.runtime.reason = False, "No PipeWire here."
+        self.service.data["enabled"] = True
+        eq = flat_eq()
+        eq["bass"] = 4
+        self.assertTrue((await self.act("edit", eq=eq))["ok"])
+        self.assertEqual(self.service.data["working"]["bass"], 4)
+
+    async def test_lasting_tool_errors_still_pause_audio(self):
+        await self.act("enable", enabled=True)
+        with patch.object(self.runtime, "apply", side_effect=ToolError("pw-dump: timed out")):
+            await self.run_monitor(loops=60)
+        self.assertIn("stop", self.runtime.events)
+        self.assertEqual(self.service.phase, "error")
+
+    async def test_a_vanished_node_restarts_the_filter_without_an_error(self):
+        await self.act("enable", enabled=True)
+        starts = self.runtime.events.count("start")
+        self.runtime.fail_next = NodeGone("DeckyEQ's live audio node is unavailable.")
+        self.assertTrue((await self.act("refresh"))["ok"])
+        self.assertEqual(self.runtime.events.count("start"), starts + 1)
+        self.assertEqual((self.service.phase, self.service.failures), ("active", 0))
+
+    async def test_an_unexpected_startup_error_still_starts_the_monitor(self):
+        runtime = FakeRuntime()
+        service = Service(Store(self.home / "other"), runtime, PresetFiles(self.home))
+        with patch.object(runtime, "recover", side_effect=AttributeError("odd tool output")):
+            await service.start()
+        self.addAsyncCleanup(service.close)
+        self.assertEqual(service.phase, "error")
+        self.assertIsNotNone(service.monitor)
+        self.assertTrue((await service.action("select", {"id": "go-s-original"}, service.revision))["ok"])
+
+    async def test_a_failed_reconnect_is_reported(self):
+        await self.act("enable", enabled=True)
+        self.runtime.fail_next = True
+        result = await self.act("refresh")
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.service.phase, "error")
+        self.assertEqual(self.runtime.events[-1], "stop")  # No half-applied filter keeps playing.
+
+    async def test_bypass_clears_an_old_backoff(self):
+        await self.act("enable", enabled=True)
+        self.service._failed(EQError("no audio"))
+        await self.act("output", target="bluez_output.headset", speakers_only=True)
+        self.assertEqual((self.service.phase, self.service.retry_at, self.service.failures), ("bypassed", 0, 0))
 
     async def test_unexpected_monitor_error_pauses_audio_without_stopping_monitoring(self):
         await self.act("enable", enabled=True)

@@ -8,13 +8,13 @@
   "private": true,
   "scripts": {
     "build": "rollup -c",
-    "typecheck": "tsc --noEmit",
-    "test": "python -m unittest discover -s tests -p test_*.py",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "python scripts/run_tests.py",
     "test:ui": "vitest run",
     "dev": "vite --host 127.0.0.1",
     "package": "npm run build:native && npm run build && python scripts/package.py",
     "build:native": "python scripts/build_native.py",
-    "check": "npm run typecheck && npm run build:native && npm test && npm run test:ui && npm run package"
+    "check": "npm run typecheck && npm run build:native && npm test && npm run test:ui && npm run build && python scripts/package.py"
   },
   "devDependencies": {
     "@decky/api": "1.1.3",

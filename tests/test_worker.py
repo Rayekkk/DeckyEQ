@@ -38,7 +38,7 @@ class WorkerTests(unittest.TestCase):
             pipewire = Path(temp) / "pipewire"
             pipewire.write_text(FAKE_PIPEWIRE)
             pipewire.chmod(0o755)
-            parent = subprocess.Popen([sys.executable, "-I", "-c", PARENT, str(WORKER), str(pipewire), "deckyeq.conf"])
+            parent = subprocess.Popen([sys.executable, "-I", "-c", PARENT, str(WORKER), str(pipewire), "-c", "deckyeq.conf"])
             try:
                 started = Path(str(pipewire) + ".started")
                 self.assertTrue(wait_for(started.exists))
@@ -49,6 +49,22 @@ class WorkerTests(unittest.TestCase):
                 if parent.poll() is None:
                     parent.kill()
                 parent.wait()
+
+    def test_any_command_runs_with_its_own_arguments(self):
+        # pactl subscribe goes through the worker too; it must get exactly its own arguments.
+        with tempfile.TemporaryDirectory() as temp:
+            tool = Path(temp) / "pactl"
+            tool.write_text(FAKE_PIPEWIRE)
+            tool.chmod(0o755)
+            parent = subprocess.Popen([sys.executable, "-I", "-c", PARENT, str(WORKER), str(tool), "subscribe"])
+            try:
+                started = Path(str(tool) + ".started")
+                self.assertTrue(wait_for(started.exists))
+                self.assertEqual(started.read_text(), "subscribe")
+            finally:
+                parent.kill()
+                parent.wait()
+                self.assertTrue(wait_for(Path(str(tool) + ".stopped").exists))
 
 
 if __name__ == "__main__":

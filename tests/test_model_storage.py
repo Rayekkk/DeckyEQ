@@ -18,11 +18,11 @@ class PresetTests(unittest.TestCase):
         eq = flat_eq()
         self.assertEqual(validate_eq(eq), eq)
         self.assertEqual(headroom(eq)["effective_preamp"], 0)
-        self.assertEqual(controls(eq)["level_l:Mult"], 1)
+        self.assertEqual(controls(eq)["stage:level"], 0)
 
     def test_portable_round_trip_preserves_all_settings(self):
         state = initial_state()
-        state["working"]["bands"][3] = {"frequency": 374.5, "gain": -3.5, "q": 2.1, "type": "highshelf"}
+        state["working"]["bands"][3] = {"frequency": 374.5, "gain": -3.5, "q": 1.2, "type": "highshelf"}
         state["working"].update(bass=4, treble=-2.5, preamp=-7, auto_headroom=False)
         preset = create_preset(state, "My sound 🎧", state["working"])
         state["selected"] = preset["id"]
@@ -100,19 +100,25 @@ class GraphTests(unittest.TestCase):
         reloaded = json.loads(json.dumps(config))
         args = reloaded["context.modules"][-1]["args"]
         graph = args["filter.graph"]
-        self.assertEqual(len(graph["nodes"]), 67)  # 33 native filters per channel and the stereo stage.
+        self.assertEqual(len(graph["nodes"]), 65)  # 32 native filters per channel and the stereo stage.
+        self.assertEqual([n["label"] for n in graph["nodes"][:32]],
+                         ["bq_lowshelf"] + ["bq_peaking", "bq_lowshelf", "bq_highshelf"] * 10 + ["bq_highshelf"])
         external = [n for n in graph["nodes"] if n["type"] != "builtin"]
         self.assertEqual(external, [{"type": "ladspa", "name": "stage", "plugin": str(STAGE_LIBRARY),
-                                     "label": "deckyeq_stage", "control": {"width": 1.0, "gain": 0.0, "limit": 1.0,
-                                                                           "ceiling": 0.0, "release": 100.0}}])
+                                     "label": "deckyeq_stage", "control": {"level": 0.0, "width": 1.0, "gain": 0.0,
+                                                                           "ceiling": -1.0, "release": 100.0}}])
+        from deckyeq.graph import neutral
+        self.assertEqual({k: v for k, v in neutral().items() if k.endswith(":Gain") or k.startswith("stage:")},
+                         {**{k: 0.0 for k in neutral() if k.endswith(":Gain")},
+                          "stage:level": 0.0, "stage:width": 1.0, "stage:gain": 0.0})  # Leaves the sound as it is.
         self.assertEqual(args["audio.position"], ["FL", "FR"])
         self.assertEqual(args["capture.props"]["filter.smart.target"], {"node.name": 'alsa_output.target"quoted'})
         self.assertTrue(args["capture.props"]["filter.smart"])
         self.assertNotIn("target.object", args["playback.props"])  # WirePlumber links the filter itself.
         self.assertNotIn("node.always-process", args["capture.props"])  # Suspends with its output.
-        self.assertEqual(graph["inputs"], ["level_l:In", "level_r:In"])
+        self.assertEqual(graph["inputs"], ["bass_l:In", "bass_r:In"])
         self.assertEqual(graph["outputs"], ["stage:out_l", "stage:out_r"])
-        self.assertEqual(len(graph["links"]), 2 * 33)  # Each channel's chain, ending in the stage.
+        self.assertEqual(len(graph["links"]), 2 * 32)  # Each channel's chain, ending in the stage.
 
     def test_tone_filters_are_independent_from_ten_bells(self):
         eq = flat_eq()
@@ -132,18 +138,18 @@ class GraphTests(unittest.TestCase):
         self.assertFalse(same_controls(incomplete, expected))
 
     def test_headroom_follows_the_combined_response(self):
-        from deckyeq.graph import peak_gain
+        from deckyeq.graph import ALLOWANCE, peak_gain
         eq = flat_eq()
-        eq.update(bass=6, treble=6, limiter=False)  # Different frequency ranges: the peak is ~6 dB, not 12.
-        self.assertAlmostEqual(headroom(eq)["compensation"], -6.5, places=2)
+        eq.update(bass=9, treble=9)  # Different frequency ranges: the peak is ~9 dB, not 18.
+        self.assertAlmostEqual(peak_gain(eq), 9, places=1)
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
         eq = flat_eq()
         for b in eq["bands"]: b.update(frequency=1000, gain=2)  # Stacked on one frequency: they do add up.
-        eq.update(bass=3, treble=2, preamp=-1, limiter=False)
+        eq.update(bass=3, treble=2, preamp=-1)
         self.assertGreater(peak_gain(eq), 20)
-        self.assertAlmostEqual(eq["preamp"] + peak_gain(eq) + headroom(eq)["compensation"], -0.5, places=3)
-        eq["auto_headroom"] = False  # Manual: only the part above the cap is taken off.
-        from deckyeq.graph import MAX_BOOST
-        self.assertAlmostEqual(headroom(eq)["compensation"], min(0, MAX_BOOST - eq["preamp"] - peak_gain(eq)), places=3)
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - 1 - ALLOWANCE), places=3)
+        eq["auto_headroom"] = False  # An old preset field, no longer read: headroom is always on.
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - 1 - ALLOWANCE), places=3)
 
     def test_the_limiter_keeps_moderate_boosts_loud(self):
         from deckyeq.graph import ALLOWANCE, peak_gain
@@ -152,34 +158,35 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(headroom(eq)["compensation"], 0)
         eq.update(bass=9)  # Beyond it, only the excess is taken off.
         self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
-        eq.update(limiter=False)
-        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) + 0.5), places=4)
+        eq.update(limiter=False)  # An old preset field, no longer used: same result.
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
 
-    def test_input_level_with_the_limiter(self):
+    def test_input_level_boost_and_width_are_never_taken_back(self):
+        # The reported problem: Go S at +12 dB input, 200% width, "make room" played at -13 dB.
         from deckyeq.graph import ALLOWANCE, peak_gain
         eq = flat_eq()
-        eq.update(bass=9, preamp=4)  # A raised input level is deliberate: only the excess EQ boost counts.
-        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
-        eq.update(preamp=-12)  # A lowered one is room: no extra drop on top of it.
-        self.assertEqual(headroom(eq)["compensation"], 0)
-        eq.update(preamp=4, limiter=False)  # A boost forces the limiter on, and headroom knows it.
+        eq.update(bass=9, preamp=12, width=2.0)
         self.assertAlmostEqual(headroom(eq, boost=6)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
-        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) + 4 + 0.5), places=4)
-
-    def test_boost_sets_the_stage_gain_and_forces_the_limiter(self):
-        eq = flat_eq()
-        eq["limiter"] = False
-        self.assertEqual((controls(eq)["stage:gain"], controls(eq)["stage:limit"]), (0.0, 0.0))
-        self.assertEqual((controls(eq, 6)["stage:gain"], controls(eq, 6)["stage:limit"]), (6.0, 1.0))
-
-    def test_widening_counts_as_boost(self):
-        eq = flat_eq()
-        eq.update(width=2.0, limiter=False)  # Opposite-phase content (L = -R) doubles.
-        self.assertAlmostEqual(headroom(eq)["compensation"], -(20 * math.log10(2) + 0.5), places=4)
-        eq.update(width=0.5)  # Narrowing never adds level.
+        self.assertGreater(headroom(eq)["effective_preamp"], 8)
+        eq.update(preamp=-12)  # A lowered input level is room: no extra drop on top of it.
         self.assertEqual(headroom(eq)["compensation"], 0)
-        values = controls(eq)
-        self.assertEqual((values["stage:width"], values["stage:limit"]), (0.5, 0.0))
+
+    def test_boost_sets_the_stage_gain_and_extreme_cuts_stay_in_range(self):
+        eq = flat_eq()
+        self.assertEqual((controls(eq)["stage:gain"], controls(eq, 6)["stage:gain"]), (0.0, 6.0))
+        eq.update(preamp=-36, limiter=False, auto_headroom=True)
+        for band in eq["bands"]:
+            band.update(frequency=1000, gain=12)  # Compensation far below the stage's range.
+        self.assertEqual(controls(eq)["stage:level"], -96.0)
+        self.assertEqual(headroom(eq)["effective_preamp"], -96.0)  # The panel shows what is applied.
+
+    def test_width_never_lowers_the_level(self):
+        eq = flat_eq()
+        eq.update(width=2.0)  # The limiter catches rare opposite-phase peaks instead.
+        self.assertEqual(headroom(eq)["compensation"], 0)
+        eq.update(width=0.5)
+        self.assertEqual(headroom(eq)["compensation"], 0)
+        self.assertEqual(controls(eq)["stage:width"], 0.5)
 
     def test_settings_carry_the_boost_only_when_raised(self):
         state = initial_state()
@@ -208,6 +215,19 @@ class GraphTests(unittest.TestCase):
             self.assertNotIn("width", json.loads(store.path.read_text(encoding="utf-8"))["working"])
             self.assertEqual(json.loads(store.backup.read_text(encoding="utf-8"))["working"]["width"], 1.5)
             self.assertEqual(store.load()["working"], flat_eq())
+
+    def test_shelf_q_is_capped_where_it_would_resonate(self):
+        eq = flat_eq()
+        eq["bands"][0].update(type="lowshelf", q=5.0, gain=-12)
+        eq["bands"][1].update(q=5.0)  # A bell may stay narrow.
+        cleaned = validate_eq(eq)
+        self.assertEqual((cleaned["bands"][0]["q"], cleaned["bands"][1]["q"]), (1.4, 5.0))
+
+    def test_preset_ids_must_be_text(self):
+        state = initial_state()
+        state["presets"] = [{"id": int("1" * 32), "name": "Numbers", "eq": flat_eq()}]
+        with self.assertRaises(EQError):
+            validate_state(state)
 
     def test_presets_without_width_or_limiter_get_the_defaults(self):
         eq = flat_eq()
@@ -329,6 +349,27 @@ class StorageTests(unittest.TestCase):
         try: link.symlink_to(actual)
         except OSError: self.skipTest("Host cannot create symbolic links")
         with self.assertRaises(EQError): self.files.read(str(link))
+
+    def test_links_above_home_are_the_systems_business(self):
+        # Fedora Atomic links /home to /var/home; an SD card can hold ~/homebrew. Only our own
+        # folders, and links inside the home folder for file exchange, are refused.
+        real = self.home / "var-home"
+        (real / "deck" / "Documents").mkdir(parents=True)
+        linked = self.home / "home"
+        try: linked.symlink_to(real, target_is_directory=True)
+        except OSError: self.skipTest("Host cannot create symbolic links")
+        files = PresetFiles(str(linked / "deck"))
+        preset = real / "deck" / "Documents" / "mine.json"
+        preset.write_text("{}")
+        self.assertEqual(files.read(str(linked / "deck" / "Documents" / "mine.json")), "{}")
+        store = Store(linked / "deck" / "settings")
+        store.save(initial_state())
+        self.assertTrue((real / "deck" / "settings").is_dir())
+        (real / "deck" / "elsewhere").mkdir()
+        (real / "deck" / "own").symlink_to(real / "deck" / "elsewhere", target_is_directory=True)
+        with self.assertRaises(EQError): Store(linked / "deck" / "own")
+        (real / "deck" / "Documents" / "alias.json").symlink_to(preset)
+        with self.assertRaises(EQError): files.read(str(linked / "deck" / "Documents" / "alias.json"))
 
 
 if __name__ == "__main__": unittest.main()

@@ -23,6 +23,7 @@ PLUGIN_NAME = "DeckyEQ"
 ARCHIVE_ROOT = "DeckyEQ"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASE_BASE = f"https://github.com/{REPOSITORY}/releases"
+RELEASE_UPLOADER = "github-actions[bot]"  # Who uploads assets in .github/workflows/release.yml.
 MAX_METADATA = 1024 * 1024
 MAX_DOWNLOAD = 32 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
@@ -204,6 +205,13 @@ class PluginUpdates:
                 result["error"] = "The release has no unique DeckyEQ installation ZIP yet."
             return result, None
         asset = matching[0]
+        # Uploaded by the release workflow, not by hand: a stolen login alone cannot pass a ZIP off
+        # as a release build (the workflow also attests where it was built).
+        uploader = asset.get("uploader")
+        if not isinstance(uploader, dict) or uploader.get("login") != RELEASE_UPLOADER:
+            if available:
+                result["error"] = "The release ZIP was not uploaded by DeckyEQ's release workflow."
+            return result, None
         size = asset.get("size")
         digest = asset.get("digest")
         url = f"{RELEASE_BASE}/download/{tag}/{name}"

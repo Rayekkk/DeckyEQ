@@ -79,20 +79,20 @@ it("keeps the open page while QAM hides and shows again", async () => {
 it("keeps updates in About and retains a requested result while QAM is hidden", async () => {
   const { visibility, plugin } = await setup();
   open("Output and level");
-  expect(screen.queryByRole("button", { name: "Check for Updates" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "‹ DeckyEQ" }));
   open("About");
   expect(screen.getByText(/BSD 3-Clause/)).toBeTruthy();
   let resolve!: (value: unknown) => void;
   decky.checkUpdates.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
-  fireEvent.click(screen.getByRole("button", { name: "Check for Updates" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   visibility(false);
   await act(async () => resolve({ success: true, current_version: "1.0.0", update_available: false, download_available: false, no_release: true }));
   visibility(true);
   expect(screen.getByText("No public release yet")).toBeTruthy();
   expect(decky.checkUpdates).toHaveBeenCalledOnce();
   plugin.onDismount();
-  fireEvent.click(screen.getByRole("button", { name: "Check for Updates" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   expect(decky.checkUpdates).toHaveBeenCalledOnce();
 });
 

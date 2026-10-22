@@ -105,10 +105,10 @@ export function UpdateSection({ controller }: { controller: UpdateController }) 
   const [label, description] = downloaded
     ? ["Ready to install", `Version ${view.check!.latest_version} is saved; see the file below.`] : statusText(view.check);
   return <PanelSection title="Updates">
-    <PanelSectionRow><Field label={label} description={description} /></PanelSectionRow>
+    <PanelSectionRow><Field focusable label={label} description={description} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" childrenContainerWidth="max" disabled={view.busy !== null}
       onClick={() => void controller.run("check")}>
-      {view.busy === "check" ? "Checking GitHub…" : "Check for Updates"}
+      {view.busy === "check" ? "Checking GitHub…" : "Check for updates"}
     </ButtonItem></PanelSectionRow>
     {view.check?.update_available && view.check.download_available && !downloaded && <PanelSectionRow>
       <ButtonItem layout="below" childrenContainerWidth="max" disabled={view.busy !== null}
@@ -116,8 +116,8 @@ export function UpdateSection({ controller }: { controller: UpdateController }) 
         {view.busy === "download" ? "Downloading ZIP…" : `Download ${view.check.latest_version}`}
       </ButtonItem>
     </PanelSectionRow>}
-    {view.error && <PanelSectionRow><Field label="Could not complete" description={<div role="alert">{view.error}</div>} /></PanelSectionRow>}
-    {view.download?.path && <PanelSectionRow><Field label={`Version ${view.download.version} downloaded`}
+    {view.error && <PanelSectionRow><Field focusable label="Could not complete" description={<div role="alert">{view.error}</div>} /></PanelSectionRow>}
+    {view.download?.path && <PanelSectionRow><Field focusable label={`Version ${view.download.version} downloaded`}
       description={<><div style={{ overflowWrap: "anywhere" }}>{view.download.path}</div><div style={{ marginTop: 6 }}>
         Install the ZIP through Decky Settings → Developer → Install Plugin from ZIP.
       </div></>} /></PanelSectionRow>}

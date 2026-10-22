@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DECKY_API_VERSION = "1.1.3"  # Bundled under THIRD_PARTY_SOURCES; NOTICE names this version.
 REQUIRED = ["main.py", "plugin.json", "package.json", "package-lock.json", "rollup.config.js", "tsconfig.json",
-            "README.md", "DeckyEQ.png", "NOTICE", "LICENSE", "dist/index.js", "dist/index.js.map", "scripts/package.py",
-            "scripts/build_native.py", "bin/deckyeq_dsp.so"]
+            "README.md", "NOTICE", "LICENSE", "dist/index.js", "dist/index.js.map", "scripts/package.py",
+            "scripts/build_native.py", "scripts/run_tests.py", "bin/deckyeq_dsp.so"]
 SOURCE_DIRECTORIES = ("deckyeq", "src", "docs", "schemas", "presets", "native")
 SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".md", ".json", ".c")
 RUNTIME_FILES = ("DeckyEQ/main.py", "DeckyEQ/deckyeq/runtime.py", "DeckyEQ/deckyeq/worker.py",

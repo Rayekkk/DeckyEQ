@@ -13,7 +13,8 @@
    bands**, the ten band sliders.
 4. Open **Presets**, choose **Save as new…** and enter a name.
 
-The main screen holds **Enable EQ**, **Preset**, **Bass** and **Treble**. Below
+The main screen holds **Enable EQ**, **Preset**, **Volume boost**, **Bass**, **Treble**
+and **Stereo width**. Below
 them, rows with a one-line summary open **Equalizer bands**, **Presets**,
 **Output and level** and **About**; each page starts with a back button that
 takes the D-pad focus, **B** goes back one page, and going back returns focus to
@@ -63,9 +64,9 @@ be edited live and saved as a new user preset.
 
 **Legion Go S · Original** is available directly in **Preset**. It
 reproduces the native filters actually parsed from GAZuOOT's community file,
-including its +8 dB input boost and unusual frequency values. Automatic headroom
-is off for this preset. It may distort at high playback levels; reduce **Input
-level** or enable automatic headroom to make your own adjusted version.
+including its +8 dB input boost and unusual frequency values; the limiter keeps it
+from clipping. Reduce **Input level** if it sounds squashed, and save your own
+adjusted version.
 See [the exact settings and source notes](GO_S_PRESET.md). This is a Go S
 community tuning preset, not a measured calibration for Go 2.
 
@@ -96,13 +97,24 @@ The two tone sliders are additional shelves; their effects add to the ten bands.
 The chart shows **individual band gains**, not a measured speaker response.
 
 After the filters, both channels pass DeckyEQ's own stereo stage, a small LADSPA
-plugin shipped as `bin/deckyeq_dsp.so` (source: `native/deckyeq_dsp.c`). It first
-applies **Stereo width** (mid/side: 0% is mono, 100% unchanged, 200% twice the side
-signal; changes glide over about 10 ms), then **Volume boost** (0 to +12 dB, gliding
-the same way), then the **Limiter**: a stereo-linked
-look-ahead peak limiter with a 1.5 ms delay, a ceiling at full scale (0 dBFS) and
-100 ms release, so unboosted audio is never touched. Very large boosts limited this
-way can sound compressed; automatic headroom prevents that (below).
+plugin shipped as `bin/deckyeq_dsp.so` (source: `native/deckyeq_dsp.c`). It applies
+the **Input level** (minus any automatic headroom) and **Volume boost** (0 to +12 dB),
+then **Stereo width** (mid/side: 0% is mono, 100% unchanged, 200% twice the side
+signal), all gliding over about 10 ms instead of stepping, and finally a two-band
+limiter. A 4th-order Linkwitz-Riley crossover splits off the bass below 150 Hz (the two
+bands add up flat; only the phase of the lowest notes turns), and the bass gets its own
+limiter 3 dB below the ceiling, so a loud bass note no longer turns down voices and the
+rest: with a single limiter a 1 kHz tone ducked by up to 7.8 dB on every bass hit at
++11 dB input, with two bands by under 2.5 dB (the measurement's own floor). A second
+limiter on the whole signal then guarantees a -1 dBFS ceiling that also covers peaks
+between samples (its detector looks at the signal 4x oversampled). Each limiter looks
+1.5 ms ahead, holds for 25 ms so it does not trace each cycle of a low note (half a
+cycle at 20 Hz) and releases over 100 ms; together they delay the sound by about 3 ms.
+Both always run; below their ceilings they change nothing. Very large boosts limited
+this way can sound compressed; automatic headroom prevents that (below). Turning EQ
+on starts the filter neutral (flat, 0 dB) and moves it to your settings in steps;
+turning it off moves it back to neutral before it ends. WirePlumber linking the filter
+in or out of the playback path is therefore inaudible apart from its 3 ms delay.
 The volume of the Legion Go 2 speakers is set in hardware after the digital signal,
 so a boost that crosses full scale would clip at any volume; the limiter turns such
 peaks down smoothly instead. On the device, with a -1 dBFS test ceiling, a +9 dB
@@ -111,40 +123,37 @@ signal reached +6.9 dBFS. The
 filter graph is therefore stereo: every filter runs once per channel (`band0_l`,
 `band0_r`, ...), sharing the same values. Presets and settings store `width` and
 `limiter` only when they differ from 100% and on, so DeckyEQ 1.0 still reads
-everything that does not use them; files without them get those defaults.
+everything that does not use them; files without them get those defaults. DeckyEQ 1.0
+refuses a whole settings file in which any preset or the current sound uses them: before
+going back to 1.0, set width to 100% everywhere, or export your presets first. (The
+`limiter` field of 1.1's earlier builds is still read but no longer used.)
 
 **Volume boost** is a global setting, not part of a preset: the Legion Go 2 plays
 quieter under SteamOS than under Windows, whose audio driver adds its own gain and
 processing, while SteamOS's hardware mixer tops out at 0 dB. Automatic headroom never
-cancels the boost, and the limiter runs whenever the boost is above 0 dB, even for a
-preset whose limiter is off, so the boost cannot clip. Large boosts on already loud
+cancels the boost, and the limiter keeps it from clipping. Large boosts on already loud
 material are limited hard and can sound compressed. Moving the slider is a live edit
 like the EQ sliders; it is saved a second after the last change.
 
 Automatic headroom computes the combined response of all filters (bands and tone
-shelves, including resonance from adjustable-Q shelves, at 48 kHz), adds what
-widening can add (opposite-phase content grows by the full width, +6 dB at 200%),
-and lowers the
-input level. With the limiter on, it lowers it only by the part of the filter peak
-above +6 dB, so moderate boosts keep full loudness and the limiter catches the rest;
-a raised **Input level** is your deliberate gain and is kept, while a lowered one
-still counts as room. A volume boost turns the limiter on, so these rules then apply
-even to a preset whose limiter is off.
-With the limiter off, it lowers the input just enough that the loudest frequency,
-plus any positive **Input level**, stays 0.5 dB below unity. Boosts in different ranges do not add up: +6 dB
-bass and +6 dB treble need about -6.5 dB, not -12.5 dB, while filters stacked on the
-same frequency do add up. Boosting a range still makes everything else quieter by
-about the boost when the limiter is off; the panel shows the current compensation.
+shelves, including resonance from adjustable-Q shelves, at 48 kHz) and lowers the
+level only by the part of its peak above +6 dB, so moderate boosts keep full loudness
+and the limiter catches their peaks. Boosts in different ranges do not add up (+9 dB
+bass and +9 dB treble peak at about +9 dB), while filters stacked on the same frequency
+do. A raised **Input level**, the **Volume boost** and stereo widening are never taken
+back: they are your deliberate gain, and the limiter keeps them from clipping; a
+lowered input level still counts as room. The panel shows the current compensation.
+(An earlier 1.1 build also had a mode that made room for every boost, the input level
+and widening; it made boosted presets far quieter than no EQ at all and was removed.)
 Neither is a loudness normalizer or a guarantee against physical speaker distortion.
 
-With automatic headroom off, the peak is still capped: if the combined response
-plus input level exceeds +15 dB, the input level is lowered by the excess. This
-keeps an imported preset from adding extreme gain and clipping. The original Go S
-preset peaks at about +14.6 dB (+8 dB input plus filters) and is unaffected.
+Automatic headroom is always on (an earlier build had a switch for it, which changed
+about 0.6 dB on the Go S preset and only confused). Presets still carry the old
+`auto_headroom` field for compatibility; it is no longer read.
 
-The runtime lowers the input level before altering filters, makes large gain
-changes in several steps, reads the filters back, and only then raises the input
-level, also in steps. The frontend coalesces fast drags; all backend transactions
+The runtime lowers the input level before altering filters, makes large filter
+gain changes in several steps, reads the filters back, and only then raises the
+input level; the stage glides each level change. The frontend coalesces fast drags; all backend transactions
 are serialized. While audio plays, every change is read back from PipeWire before
 it is confirmed; a failed or interrupted write makes the next change read the
 filter afresh, so a rollback really restores the previous sound. Slider edits
@@ -159,8 +168,13 @@ once audio flows. The child uses isolated system Python and a clean library
 environment, rather than Decky's frozen PluginLoader executable.
 
 Each slot contains three native biquads in series; only the selected type has
-nonzero gain. The fixed graph has 33 nodes per channel, including the input
-level and two tone shelves. Type changes therefore do not restart audio.
+nonzero gain. The fixed graph has 32 filters per channel (with the two tone
+shelves) and the stage. Type changes, also from switching presets, are therefore
+live control updates: audio never restarts and never plays without EQ. (One filter
+per slot would save about 1% of a core but needs a rebuild for every type change.)
+Large frequency jumps are written in steps of half an octave or less.
+A shelf's Q is capped at 1.4: above it the shelf resonates, so a "cut" boosts near its
+corner. Imported presets are capped the same way.
 The frequency slider covers 20 Hz – 20 kHz. PipeWire's single-precision
 biquads become unstable below about 6 Hz and just under Nyquist, so values
 between 0 and 20 Hz snap to 20 Hz and values between 20 and 24 kHz snap to
@@ -176,11 +190,17 @@ output's active port; a missing/unknown port is bypassed rather than guessed.
 Turn it off if you deliberately want to EQ a selected headset, USB device or
 HDMI output. The monitor listens to PulseAudio events (`pactl subscribe`) and
 reacts to output, card and server changes about 0.15 seconds after a burst of
-events settles. Without events it only re-reads the filter's controls every
-15 seconds while EQ is active; if the event stream is unavailable it falls back
-to checking every 1.5 seconds.
-After a failure, retries wait 8, 16, 32 and then 60 seconds. This is a software polling guard, not an instantaneous hardware
-interlock; there can be a short transition before bypass.
+events settles; changes of DeckyEQ's own sink are ignored. Without events it only
+re-reads the filter's controls every 15 seconds while EQ is active; if the event
+stream is unavailable it falls back to checking every 1.5 seconds.
+A tool that does not answer (for example `pw-dump` timing out while a game loads)
+leaves the filter playing; only three such misses in a row, or a real mismatch, pause
+EQ. If PipeWire restarts under the filter, DeckyEQ builds it again without an error.
+After a failure, retries wait 8, 16, 32 and then 60 seconds, and a filter that keeps
+failing keeps that backoff until it has run for a minute. This is a software polling
+guard, not an instantaneous hardware interlock; there can be a short transition
+before bypass. `pactl subscribe` and the filter both run through `worker.py`, so they
+end with the plugin even if Decky is killed.
 
 Steam's output choice is never overridden. Unplugging the target pauses EQ;
 reconnecting it resumes with the saved settings.
@@ -195,7 +215,8 @@ that it does not own blocks activation with an explanatory error.
 
 **About → Updates** uses the release flow shared with SpotiDeck and Legion
 Go 2 Companion. It checks `Rayekkk/DeckyEQ` only when requested, then downloads a
-newer stable `DeckyEQ-X.Y.Z.zip` with a matching GitHub asset digest. Installation
+newer stable `DeckyEQ-X.Y.Z.zip` uploaded by the release workflow (`github-actions[bot]`)
+with a matching GitHub asset digest; a hand-uploaded ZIP is never offered. Installation
 remains a separate action in Decky's Developer settings. A repository with no
 release is a normal state. Downloads do not require extra Python packages.
 
@@ -227,7 +248,9 @@ Shared limits (band frequencies, value ranges, the boost cap) live in
 `deckyeq/limits.json` and are read by both the backend and the panel.
 `tests/fixtures/` holds data generated by the Python backend that the frontend
 tests replay: a real status snapshot and headroom/frequency parity vectors.
-Regenerate them after an intended change with `DECKYEQ_UPDATE_FIXTURES=1 npm test`.
+Regenerate them after an intended change with `DECKYEQ_UPDATE_FIXTURES=1 npm test`
+(PowerShell: `$env:DECKYEQ_UPDATE_FIXTURES=1; npm test`). `npm run typecheck` checks
+the tests' types too.
 
 ### Releases
 

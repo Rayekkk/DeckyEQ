@@ -21,6 +21,14 @@ class EQError(ValueError):
     pass
 
 
+class ToolError(EQError):
+    """A system audio tool could not be run or did not answer: the sound itself is unknown, not wrong."""
+
+
+class NodeGone(EQError):
+    """Our filter's node vanished (e.g. PipeWire restarted) while its process lives: start it again."""
+
+
 def number(value, low, high, label):
     # The range check also rejects NaN/inf and runs before float(), which overflows on huge JSON integers.
     if type(value) not in (int, float) or not low <= value <= high:
@@ -86,9 +94,11 @@ def validate_eq(value, legacy=False):
         kind = band.get("type", "peaking")  # Version 1 bands are all bells.
         if kind not in FILTER_TYPES:
             raise EQError(f"Band {i + 1} has an unsupported filter type.")
+        q = number(band["q"], *LIMITS["q"], "Band Q")
+        if kind != "peaking":  # A shelf's Q above this resonates: a "cut" boosts near its corner.
+            q = min(q, float(LIMITS["shelf_q_max"]))
         cleaned.append({"type": kind, "frequency": frequency(band["frequency"], legacy),
-                        "gain": number(band["gain"], *LIMITS["band_gain"], "Band gain"),
-                        "q": number(band["q"], *LIMITS["q"], "Band Q")})
+                        "gain": number(band["gain"], *LIMITS["band_gain"], "Band gain"), "q": q})
     if type(value["auto_headroom"]) is not bool:
         raise EQError("Automatic headroom must be on or off.")
     if type(value["limiter"]) is not bool:
@@ -126,7 +136,7 @@ def validate_state(value):
         raise EQError("Invalid preset library.")
     ids = set(FACTORY_IDS)
     for item in items:
-        if not isinstance(item, dict) or not re.fullmatch(r"[a-f0-9]{32}", str(item.get("id", ""))):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not re.fullmatch(r"[a-f0-9]{32}", item["id"]):
             raise EQError("Invalid preset identity.")
         if item["id"] in ids:
             raise EQError("Duplicate preset identity.")

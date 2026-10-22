@@ -4,24 +4,20 @@ from __future__ import annotations
 import functools
 import math
 from pathlib import Path
-from .model import FREQUENCIES, LIMITS, validate_eq
+from .model import FREQUENCIES, LIMITS, flat_eq, validate_eq
 
 SINK_NAME = "DeckyEQ"  # Steam lists a virtual sink by its node name, as it has no sound card name.
 LEGACY_SINK_NAME = "deckyeq.sink"  # DeckyEQ 1.0's virtual output, still recognised for recovery.
 PLAYBACK_NAME = "deckyeq.playback"
 SHELF_Q = 2 ** -0.5
 VARIANTS = (("peaking", ""), ("lowshelf", "_low"), ("highshelf", "_high"))
-# Manual headroom still caps the peak gain, so an imported preset cannot add extreme boost
-# and clip. The Go S original peaks at about +14.6 dB and stays below it.
-MAX_BOOST = float(LIMITS["max_boost"])
 # With the limiter on, automatic headroom leaves this much boost to it: louder, and still clean.
 ALLOWANCE = float(LIMITS["limiter_allowance"])
 CHANNELS = ("l", "r")
-LEVEL = tuple(f"level_{c}:Mult" for c in CHANNELS)  # The input level, one control per channel.
-LIMIT = "stage:limit"
-# The stereo width and look-ahead limiter stage, built from native/deckyeq_dsp.c.
+LEVEL = "stage:level"  # The input level in dB, including headroom; the stage glides it.
+MUTED = -96.0  # The stage's lowest level.
+# The level, stereo width, volume boost and look-ahead limiter stage, built from native/deckyeq_dsp.c.
 STAGE_LIBRARY = Path(__file__).resolve().parent.parent / "bin" / "deckyeq_dsp.so"
-MARGIN = float(LIMITS["headroom_margin"])
 RATE = float(LIMITS["sample_rate"])  # The combined response is evaluated at SteamOS's usual rate.
 NYQUIST = RATE / 2
 # Check points 1/24 octave apart from 10 Hz; 0 Hz, Nyquist and each filter's frequency are added,
@@ -103,30 +99,24 @@ def peak_gain(eq):
 
 
 def headroom(eq, boost=0.0):
-    # Automatic headroom lowers the input just enough that the loudest frequency, after all filters,
-    # the input level and stereo widening, stays MARGIN dB below unity: boosts in different ranges
-    # do not add up. Widening multiplies the side signal by width: opposite-phase content (L = -R)
-    # grows by all of it. With the limiter on (also when a volume boost forces it), a raised input
-    # level is the user's deliberate gain and is left alone, as is the first ALLOWANCE dB of filter
-    # boost: the limiter catches those peaks. A lowered input level still counts as room.
-    shaped = peak_gain(eq) + (20 * math.log10(eq["width"]) if eq["width"] > 1 else 0.0)
-    peak = eq["preamp"] + shaped
-    excess = shaped + min(0.0, eq["preamp"]) - ALLOWANCE
-    if not eq["auto_headroom"]:
-        compensation = min(0.0, MAX_BOOST - peak)
-    elif eq["limiter"] or boost > 0:
-        compensation = -excess if excess > 0 else 0.0
-    else:
-        compensation = -(peak + MARGIN) if peak > 0 else 0.0
+    # The limiter always guards the output, so headroom only keeps it from squashing large EQ boosts:
+    # the level drops by the part of the filters' combined peak above ALLOWANCE. It never takes back
+    # the input level, the volume boost or stereo widening, which the user chose to be louder or
+    # wider (a lowered input level still counts as room). The preset field auto_headroom is kept for
+    # compatibility and no longer read. boost is accepted for symmetry with controls() only.
+    del boost
+    excess = peak_gain(eq) + min(0.0, eq["preamp"]) - ALLOWANCE
+    compensation = -excess if excess > 0 else 0.0
+    # The stage cannot go below MUTED: report what is really applied.
+    compensation = max(compensation, MUTED - eq["preamp"])
     return {"compensation": round(compensation, 4), "effective_preamp": round(eq["preamp"] + compensation, 4)}
 
 
 def controls(eq, boost=0.0):
     """Every live control: the filters once per channel (node_l, node_r), then the stereo stage.
-    boost is the global volume boost in dB; the limiter always runs while it is up."""
+    boost is the global volume boost in dB."""
     eq = validate_eq(eq)
-    mono = {"level:Mult": 10 ** (headroom(eq, boost)["effective_preamp"] / 20), "level:Add": 0.0,
-            "bass:Freq": float(LIMITS["bass_frequency"]), "bass:Q": SHELF_Q, "bass:Gain": eq["bass"],
+    mono = {"bass:Freq": float(LIMITS["bass_frequency"]), "bass:Q": SHELF_Q, "bass:Gain": eq["bass"],
             "treble:Freq": float(LIMITS["treble_frequency"]), "treble:Q": SHELF_Q, "treble:Gain": eq["treble"]}
     for i, band in enumerate(eq["bands"]):
         for kind, suffix in VARIANTS:
@@ -137,9 +127,9 @@ def controls(eq, boost=0.0):
     for key, value in mono.items():
         node, port = key.split(":", 1)
         result.update({f"{node}_{c}:{port}": value for c in CHANNELS})
+    result[LEVEL] = headroom(eq, boost)["effective_preamp"]
     result["stage:width"] = eq["width"]
     result["stage:gain"] = float(boost)
-    result[LIMIT] = 1.0 if eq["limiter"] or boost > 0 else 0.0
     return result
 
 
@@ -148,11 +138,18 @@ def control_payload(values):
     return {"params": [item for pair in values.items() for item in pair]}
 
 
+def neutral():
+    """Controls that leave the sound as it is: the filter starts and ends here, so being linked in
+    or out of the playback path is inaudible apart from its 1.6 ms delay."""
+    return controls(flat_eq())
+
+
 def filter_config(eq, target, owner, stage=STAGE_LIBRARY, boost=0.0):
     values = controls(eq, boost)
-    specs = [("level", "linear"), ("bass", "bq_lowshelf")]
-    # Each slot has three serial native filters. Inactive types have 0 dB gain,
-    # so changing type is a live control update, without rebuilding the graph.
+    # Each slot has three serial native filters; inactive types have 0 dB gain. Changing a type
+    # (also by switching presets) is then a live control update, never a rebuild that would let
+    # unequalized audio through. It costs about 1% of a core while playing.
+    specs = [("bass", "bq_lowshelf")]
     specs += [(f"band{i}{suffix}", "bq_" + kind) for i in range(len(FREQUENCIES)) for kind, suffix in VARIANTS]
     specs += [("treble", "bq_highshelf")]
     control = lambda node: {name.split(":", 1)[1]: value for name, value in values.items() if name.startswith(node + ":")}
@@ -177,7 +174,7 @@ def filter_config(eq, target, owner, stage=STAGE_LIBRARY, boost=0.0):
                     "node.description": "DeckyEQ", "media.name": "DeckyEQ", "audio.channels": 2,
                     "audio.position": ["FL", "FR"],
                     "filter.graph": {"nodes": nodes, "links": links,
-                                     "inputs": [f"level_{c}:In" for c in CHANNELS],
+                                     "inputs": [f"bass_{c}:In" for c in CHANNELS],
                                      "outputs": [f"stage:out_{c}" for c in CHANNELS]},
                     # A WirePlumber (0.5+) smart filter: playback aimed at the target output,
                     # directly or as the default, is linked through this sink first. The filter

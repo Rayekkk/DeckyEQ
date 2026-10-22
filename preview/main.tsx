@@ -12,7 +12,7 @@ const updates = new UpdateController({
   download: async () => ({ success: false, error: "Downloads are simulated in this preview." }),
 });
 createRoot(document.getElementById("root")!).render(<div className="preview-shell">
-  <aside className="preview-context"><div className="preview-kicker">DECKYEQ / 1.0</div>
+  <aside className="preview-context"><div className="preview-kicker">DECKYEQ / {version}</div>
     <h1>Make it<br /><span>your sound.</span></h1><p>A live equalizer, tone controls and a library of your own presets.</p>
     <div className="preview-caption">UI preview · simulated backend<br />No audio is processed in this browser.</div>
   </aside>

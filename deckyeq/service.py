@@ -8,14 +8,16 @@ import time
 from pathlib import Path
 
 from .graph import SINK_NAME, headroom
-from .model import (EQError, FACTORY_IDS, LIMITS, MAX_PRESETS, create_preset, decode_import, export_document,
-                    flat_eq, name, number, presets, selected_preset, validate_eq, validate_state)
+from .model import (EQError, FACTORY_IDS, LIMITS, MAX_PRESETS, NodeGone, ToolError, create_preset, decode_import,
+                    export_document, flat_eq, name, number, presets, selected_preset, validate_eq, validate_state)
 
 VERSION = json.loads((Path(__file__).resolve().parent.parent / "package.json").read_text(encoding="utf-8"))["version"]
 VERIFY_SECONDS = 15  # Monitor heartbeat: re-reads the filter's controls; edits always read back.
 DRAFT_SAVE_SECONDS = 1.0  # Slider edits reach the disk this long after the last one (not per step).
 DRAFT_WARNING = "Your latest edits could not be saved: "
 ERROR_PAUSE_SECONDS = 2  # After an unexpected monitor error, so a repeating failure cannot spin the loop.
+TOOL_RETRIES = 3  # Heartbeat tool hiccups (e.g. pw-dump timing out while a game loads) tolerated in a row.
+STABLE_SECONDS = 60  # Failures are forgotten only after the filter has run this long without one.
 
 
 class Service:
@@ -31,7 +33,11 @@ class Service:
         self.closed = False
         self.retry_at = 0.0
         self.failures = 0
+        self.failed_at = -STABLE_SECONDS
+        self.tool_errors = 0
+        self.owed = False  # An event's rescan failed on a tool hiccup: do it at the next chance.
         self.draft_task = None  # Pending save of slider edits; any other change saves at once.
+        self.draft_dirty = False  # Slider edits not yet on disk, also after a failed save.
 
     async def start(self):
         # Serialized with close(): an unload during startup must not leave routing or a monitor behind.
@@ -44,7 +50,7 @@ class Service:
                     await self._sync(self.data)
                     if not self.data["enabled"]:
                         await self.runtime.scan()  # The idle monitor rescans only on audio events.
-                except (EQError, OSError) as exc:
+                except Exception as exc:  # Never leave the plugin without a monitor for the session.
                     self._failed(exc)
             else:
                 self.phase, self.message = "unavailable", self.runtime.reason
@@ -55,14 +61,16 @@ class Service:
         self.error = str(exc)
         self.phase, self.message = "error", "Audio changes are paused. Retry after checking your output."
         self.failures += 1
-        self.retry_at = time.monotonic() + min(60, 8 * 2 ** (self.failures - 1))
+        self.failed_at = time.monotonic()
+        self.retry_at = self.failed_at + min(60, 8 * 2 ** (self.failures - 1))
 
     async def _watch(self):
         while not self.closed:
             try:
                 retry_in = self.retry_at - time.monotonic()
-                changed = await self.runtime.wait_for_change(
-                    max(0.5, min(VERIFY_SECONDS, retry_in)) if retry_in > 0 else VERIFY_SECONDS)
+                wait = 0.5 if self.owed else max(0.5, min(VERIFY_SECONDS, retry_in)) if retry_in > 0 else VERIFY_SECONDS
+                changed = await self.runtime.wait_for_change(wait) or self.owed
+                self.owed = changed
                 async with self.lock:
                     if self.closed or not self.runtime.supported:
                         continue
@@ -72,14 +80,26 @@ class Service:
                         continue
                     if not changed and self.runtime.running:
                         # Heartbeat: outputs only change with an event, so just re-verify the filter.
-                        await self.runtime.apply(self.data["working"], VERIFY_SECONDS, self.data["boost"])
+                        try:
+                            await self.runtime.apply(self.data["working"], VERIFY_SECONDS, self.data["boost"])
+                        except NodeGone:
+                            await self._rebuild(self.data)
+                        self.tool_errors, self.owed = 0, False
                         continue
                     if changed and not self.data["enabled"]:
                         await self.runtime.scan()  # Keep the output list current while EQ is off.
                     await self._sync(self.data, max_age=VERIFY_SECONDS)
+                self.tool_errors, self.owed = 0, False
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # Unexpected tool output must pause audio, never end monitoring.
+                if isinstance(exc, ToolError) and self.tool_errors < TOOL_RETRIES:
+                    # A tool that did not answer says nothing about the sound, which is still the last
+                    # confirmed setting: keep it playing and look again shortly.
+                    self.tool_errors += 1
+                    await asyncio.sleep(ERROR_PAUSE_SECONDS)
+                    continue
+                self.tool_errors = 0
                 async with self.lock:
                     try:
                         await self.runtime.stop()
@@ -87,6 +107,11 @@ class Service:
                         pass  # Without the filter, playback continues on the output directly.
                     self._failed(exc)
                 await asyncio.sleep(ERROR_PAUSE_SECONDS)
+
+    async def _rebuild(self, data):
+        """PipeWire restarted under the filter (its node is gone): build it again, no error."""
+        await self.runtime.start(data["working"], data["target"], data["boost"])
+        await self._sync(data)
 
     async def _recover(self):
         """Settle a journal left by DeckyEQ 1.0. Never fatal: it must not block EQ or the monitor."""
@@ -107,6 +132,7 @@ class Service:
             if runtime.process is not None:
                 await runtime.stop()
             self.phase, self.message, self.error = "off", "EQ is off. Your presets are kept.", None
+            self.retry_at, self.failures = 0, 0
             return
         outputs, default = await runtime.scan()
         target = next((o for o in outputs if o["name"] == data["target"]), None)
@@ -116,18 +142,24 @@ class Service:
             self.phase, self.error = "waiting" if target is None else "bypassed", None
             self.message = ("Waiting for the selected audio output." if target is None
                             else "Bypassed: the selected output is not using its speaker port.")
+            self.retry_at, self.failures = 0, 0  # Nothing runs: no backoff to carry over.
             return
         if not runtime.running or runtime.target != data["target"]:
             await runtime.start(data["working"], data["target"], data["boost"])
         else:
-            await runtime.apply(data["working"], max_age, data["boost"])
+            try:
+                await runtime.apply(data["working"], max_age, data["boost"])
+            except NodeGone:  # PipeWire restarted under the filter: build it again, no error.
+                await runtime.start(data["working"], data["target"], data["boost"])
         # Playback that Steam sends elsewhere does not pass the filter; apps that pick the target
         # themselves still do, so "standby" describes Steam's output, not every stream.
         playing = default in (data["target"], SINK_NAME)
         self.phase = "active" if playing else "standby"
         self.message = ("Live EQ · " + target["description"] if playing else
                         f"Standby · Steam is playing to another output. EQ applies to {target['description']}.")
-        self.error, self.retry_at, self.failures = None, 0, 0
+        self.error, self.retry_at = None, 0
+        if time.monotonic() - self.failed_at > STABLE_SECONDS:  # A filter that keeps dying keeps its backoff.
+            self.failures = 0
 
     def snapshot(self):
         selected = selected_preset(self.data)
@@ -172,7 +204,15 @@ class Service:
                 if not isinstance(payload, dict):
                     raise EQError("Invalid request.")
                 if action == "refresh":
-                    await self._sync(self.data)
+                    try:
+                        await self._sync(self.data)
+                    except Exception as exc:  # A half-done reconnect must not look like success.
+                        try:
+                            await self.runtime.stop()  # Like the monitor: no half-applied filter stays.
+                        except Exception:
+                            pass
+                        self._failed(exc)
+                        raise EQError(str(exc)) from None
                     return {"ok": True, "state": self.snapshot()}
                 if action == "export":
                     path = self._export(payload)
@@ -185,8 +225,8 @@ class Service:
                 # A draft edit keeps the previous settings backup; library changes refresh it.
                 await self._commit(validate_state(updated), backup=action != "edit")
                 return {"ok": True, "state": self.snapshot(), "message": note}
-            except (ValueError, OSError, TypeError, KeyError) as exc:
-                return {"ok": False, "error": str(exc), "state": self.snapshot()}
+            except Exception as exc:  # Reported to the panel, never a raw exception to Decky.
+                return {"ok": False, "error": str(exc) or type(exc).__name__, "state": self.snapshot()}
 
     async def _commit(self, updated, backup):
         """Apply a validated state to audio, then to disk; any failure restores the previous sound.
@@ -195,18 +235,22 @@ class Service:
         if updated == old:
             return
         # Editing a library entry must not touch audio.
-        audio = [key for key in AUDIO_KEYS if updated[key] != old[key]]
+        audio = [key for key in AUDIO_KEYS if updated[key] != old[key]] if self.runtime.supported else []
         draft_only = bool(audio) and set(audio) <= {"working", "boost"}
         try:
             if draft_only and self.phase in ("active", "standby") and self.runtime.running:
-                # A slider edit needs no output rescan.
-                await self.runtime.apply(updated["working"], boost=updated["boost"])
+                try:  # A slider edit needs no output rescan.
+                    await self.runtime.apply(updated["working"], boost=updated["boost"])
+                except NodeGone:
+                    await self._rebuild(updated)
             elif audio and not (draft_only and time.monotonic() < self.retry_at):
                 # While audio is paused after a failure, a draft edit is only kept; the monitor
                 # applies it when it retries, instead of every slider step restarting the filter.
                 await self._sync(updated)
             if backup:
                 self.store.save(updated, backup=True)
+                if self.store.warning and self.store.warning.startswith(DRAFT_WARNING):
+                    self.store.warning = None
         except Exception as exc:
             try:
                 if audio:
@@ -219,10 +263,9 @@ class Service:
                 self._failed(EQError(f"{exc} Rollback: {rollback}"))
             raise EQError(str(exc)) from None
         self.data, self.revision = updated, self.revision + 1
-        if backup:
-            self._cancel_draft()
-        else:
-            self._cancel_draft()
+        self._cancel_draft()
+        self.draft_dirty = not backup
+        if not backup:
             self.draft_task = asyncio.create_task(self._save_draft_later())
 
     def _cancel_draft(self):
@@ -241,7 +284,8 @@ class Service:
             self.store.save(self.data, backup=False)
         except (EQError, OSError) as exc:
             self.store.warning = DRAFT_WARNING + str(exc)
-            return
+            return  # Still dirty: the next edit or close() tries again.
+        self.draft_dirty = False
         if self.store.warning and self.store.warning.startswith(DRAFT_WARNING):
             self.store.warning = None
 
@@ -337,14 +381,16 @@ class Service:
         self.closed = True
         # Cancel the monitor only between transactions, and keep unsaved slider edits.
         async with self.lock:
-            if self.draft_task is not None:
-                self._cancel_draft()
+            self._cancel_draft()
+            if self.draft_dirty:
                 self._save_draft()
             if self.monitor:
                 self.monitor.cancel()
                 await asyncio.gather(self.monitor, return_exceptions=True)
-            await self.runtime.stop()
-            await self.runtime.close_events()
+            try:
+                await self.runtime.stop()
+            finally:
+                await self.runtime.close_events()
 
 
 AUDIO_KEYS = ("enabled", "working", "target", "speakers_only", "boost")

@@ -26,9 +26,9 @@ A live equalizer, bass and treble controls, and your own presets inside Gaming M
 | **Built-in presets** | Start from Flat or the community **Legion Go S · Original** preset |
 | **Import and export** | Share individual sounds or your saved preset library as portable JSON files |
 | **Saved drafts** | Keeps your latest edits when you close QAM or restart Decky |
-| **Volume boost** | Up to +12 dB louder than SteamOS's maximum, for every preset, kept clean by the limiter |
+| **Volume boost** | Up to +12 dB louder than SteamOS's maximum, for every preset, kept from clipping by the limiter |
 | **Stereo width** | From mono to twice as wide, applied live |
-| **Limiter** | A look-ahead peak limiter keeps boosts loud by turning down only peaks that would clip |
+| **Limiter** | A look-ahead peak limiter keeps every boost from clipping; boosts can stay loud |
 | **Level and headroom** | Adjust input gain and optionally compensate for large boosts |
 | **Output selection** | Apply EQ to your chosen output, with speaker-only bypass enabled by default |
 | **Normal volume control** | EQ sits in front of the chosen output; Steam's volume, volume buttons and output choice stay untouched |
@@ -77,7 +77,7 @@ The main screen holds what you use every day: **Enable EQ**, the **Preset** list
 |---|---|
 | **Equalizer bands** | The ten band sliders, **Edit one band** (filter type, frequency, width) and **Reset to flat** |
 | **Presets** | Your library, saving and naming sounds, and importing or exporting JSON files |
-| **Output and level** | The output EQ applies to, speakers-only bypass, the limiter, automatic headroom and input level |
+| **Output and level** | The output EQ applies to, speakers-only bypass and the input level |
 | **About** | Plugin version, author, license and GitHub updates |
 
 Technical facts and rare actions sit under **Show details** at the bottom of a page;
@@ -98,8 +98,8 @@ format. EasyEffects and Equalizer APO files need conversion before use.
 
 The included preset follows the filters actually parsed by PipeWire from GAZuOOT's
 community Go S configuration, including its +8 dB input boost and unusual frequency
-values. Automatic headroom is off for this preset. It can distort at high levels;
-lower **Input level** or enable **Automatic headroom** to adjust it for your speakers.
+values. The limiter keeps its loud setting from clipping; lower **Input level** if it
+sounds squashed on your speakers.
 
 This is community tuning for Go S, not a measured Go 2 calibration. The
 [source notes and exact parameters](docs/GO_S_PRESET.md) describe the mapping.
@@ -110,9 +110,12 @@ This is community tuning for Go S, not a measured Go 2 calibration. The
 
 ## Updates
 
-Open **About** and select **Check for Updates**. When a newer stable
+Open **About** and select **Check for updates**. When a newer stable
 release is available, select **Download**. The plugin saves the installation ZIP to
-your Downloads folder after checking its GitHub SHA-256 digest, size, contents and version.
+your Downloads folder after checking that DeckyEQ's release workflow uploaded it, and its
+GitHub SHA-256 digest, size, contents and version. The digest proves the file arrived intact,
+not who built it; `gh attestation verify DeckyEQ-X.Y.Z.zip --repo Rayekkk/DeckyEQ` checks
+that GitHub Actions built it from this repository.
 
 Install the downloaded ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
 Checks and downloads run only when requested. The plugin does not install updates itself.
@@ -122,8 +125,9 @@ If the repository has no public release yet, it shows **No public release yet**.
 
 ## How it works
 
-DeckyEQ processes stereo playback with PipeWire's built-in filters. Slider and filter
-changes update the running graph without restarting PipeWire. It uses your existing
+DeckyEQ processes stereo playback with PipeWire's built-in filters and its own small
+stage for level, width, boost and limiting. Every change, including switching presets,
+updates the running filter live. It uses your existing
 audio session and runs without root privileges or extra audio packages.
 
 The equalizer is a WirePlumber **smart filter** placed in front of the output you choose.
@@ -138,13 +142,15 @@ continues on the output directly at your volume. Requires WirePlumber 0.5 or new
 port. Turn it off to apply EQ to a selected headset or HDMI output. Disabling or unloading
 the plugin stops its audio processing and keeps your preset library.
 
-The **Limiter** (on by default) lets boosts stay loud: it catches peaks that would
-clip, a millisecond and a half before they reach the speakers; unboosted audio passes untouched. Automatic headroom then
-only lowers the input for EQ boosts above +6 dB, which the limiter alone would squash, and
-keeps a raised **Input level**; with the limiter off it makes room for every boost,
-including the input level, so boosted presets get quieter. **Volume boost** raises
-everything after the filters, for all presets, and keeps the limiter running while it is up:
-use it when the speakers are too quiet at full volume. Neither
+A two-band limiter always guards the output: it turns down peaks that would clip before
+they reach the speakers, and leaves audio that stays below -1 dBFS untouched. The bass has
+its own limiter, so a loud bass note turns down only the bass, not voices and everything
+else; very large boosts can still sound compressed. Automatic headroom lowers the level only
+for EQ boosts above +6 dB, which the limiter alone would squash. It never takes back your
+**Input level**, the **Volume boost** or stereo widening: those are yours, and the limiter
+keeps them from clipping.
+**Volume boost** raises everything after the filters, for all presets: use it when the
+speakers are too quiet at full volume. Neither
 protects speakers from physical overload at high volume. DeckyEQ provides sound tuning;
 it does not reproduce Windows/Nahimic
 processing or claim to fix a confirmed Go 2 driver defect.
@@ -174,10 +180,10 @@ in the interface.
 
 <br>
 
-With the **Limiter** off, automatic headroom lowers the input level by the full boost,
-so boosting bass or treble mostly makes everything else quieter. Keep the limiter on.
-If you hear distortion with both off, reduce **Input level** or enable them in
-**Output and level**.
+Only EQ boosts above +6 dB lower the level, by the part above it. Raise the **Input level**
+or the **Volume boost** for more loudness. Once the limiter is working hard, more gain only
+compresses the sound instead of making it louder (the output cannot exceed full scale); lower
+the gain if it sounds squashed.
 The built-in Go S preset intentionally retains the original gain settings.
 
 </details>
@@ -212,7 +218,9 @@ be checked with `gh attestation verify`.
 
 ## Development
 
-Build requirements: Node.js 20+ / npm and Python 3.10+. Users install the prebuilt ZIP.
+Build requirements: Node.js 20+ / npm, Python 3.10+ and gcc (on Windows: WSL with gcc and
+python3, which `npm test` also uses to run the native-stage and Linux-only tests). Users
+install the prebuilt ZIP.
 
 ```bash
 npm ci

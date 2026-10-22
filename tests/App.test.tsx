@@ -33,7 +33,7 @@ it("keeps everyday controls on the main screen and the rest one row away", async
   expect(screen.getByRole("slider", { name: "Stereo width" })).toBeTruthy();
   expect(screen.getByRole("button", { name: /^Equalizer bands\s*10 bands · flat/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: /^Presets\s*2 presets/ })).toBeTruthy();
-  expect(screen.getByRole("button", { name: /^Output and level\s*Legion Go 2 speakers · limiter on/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^Output and level\s*Legion Go 2 speakers · full level/ })).toBeTruthy();
   open("Equalizer bands");
   expect(screen.getAllByRole("slider")).toHaveLength(10);
   expect(screen.queryByRole("switch", { name: "Enable EQ" })).toBeNull();
@@ -56,24 +56,15 @@ it("boosts the volume for every preset without marking it edited", async () => {
   await act(async () => { await controller.flush(); });
   expect(perform.mock.calls.at(-1)?.[1]).not.toHaveProperty("boost");  // Only sent when moved.
   expect(engine.value.state.boost).toBe(6);
-  open("Output and level");
-  fireEvent.click(screen.getByRole("switch", { name: "Limiter" }));
-  await act(async () => { await controller.flush(); });
-  expect(screen.getByText(/still runs while Volume boost is up/)).toBeTruthy();
 });
 
-it("sets stereo width and the limiter live", async () => {
+it("sets stereo width live, without lowering the level", async () => {
   const { controller, engine } = await setup();
-  fireEvent.change(screen.getByRole("slider", { name: "Stereo width" }), { target: { value: "150" } });
+  fireEvent.change(screen.getByRole("slider", { name: "Stereo width" }), { target: { value: "200" } });
   await act(async () => { await controller.flush(); });
-  expect(engine.value.state.working.width).toBe(1.5);
+  expect(engine.value.state.working.width).toBe(2);
   expect(screen.getByText("Wider than the original mix.")).toBeTruthy();
-  open("Output and level");
-  fireEvent.click(screen.getByRole("switch", { name: "Limiter" }));
-  await act(async () => { await controller.flush(); });
-  expect(engine.value.state.working.limiter).toBe(false);
-  back();
-  expect(screen.getByRole("button", { name: /^Output and level\s*Legion Go 2 speakers · auto headroom/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^Output and level\s*Legion Go 2 speakers · full level/ })).toBeTruthy();
 });
 
 it("summarises adjusted bands and unsaved changes on the main rows", async () => {
@@ -95,7 +86,7 @@ it("saves the most recent tone adjustment as a named preset", async () => {
   await nameDialog("Save as new preset", "My speakers", "Save");
   await waitFor(() => expect(engine.value.presets.at(-1)?.name).toBe("My speakers"));
   expect(engine.value.presets.at(-1)?.eq.bass).toBe(4);
-  await waitFor(() => expect(button("› My speakers")).toBeTruthy());
+  await waitFor(() => expect((screen.getByRole("combobox", { name: "Preset" }) as HTMLSelectElement).selectedOptions[0].text).toBe("My speakers"));
 });
 
 it("renames, saves and deletes only user presets", async () => {
@@ -105,8 +96,8 @@ it("renames, saves and deletes only user presets", async () => {
   open("Presets");
   expect(screen.queryByRole("button", { name: "Rename…" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete…" })).toBeNull();
-  fireEvent.click(button("Mine"));
-  await waitFor(() => expect(button("› Mine")).toBeTruthy());
+  fireEvent.change(screen.getByRole("combobox", { name: "Preset" }), { target: { value: "mine" } });
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Mine" })).toBeTruthy());
   fireEvent.click(button("Rename…"));
   const dialog = await screen.findByRole("dialog", { name: "Rename preset" });
   expect((dialog.querySelector("input") as HTMLInputElement).value).toBe("Mine");
@@ -236,7 +227,7 @@ it("selects the original Go S preset including shelves and positive input level"
   back();
   open("Output and level");
   expect((screen.getByRole("slider", { name: "Input level" }) as HTMLInputElement).value).toBe("8");
-  expect((screen.getByRole("switch", { name: "Automatic headroom" }) as HTMLInputElement).checked).toBe(false);
+  expect(screen.queryByRole("switch", { name: "Automatic headroom" })).toBeNull();  // Always on now.
   back();
   open("Presets");
   expect(screen.queryByRole("button", { name: "Delete…" })).toBeNull();
@@ -261,7 +252,7 @@ async function openBand() {
   open("Equalizer bands");
   fireEvent.click(screen.getByRole("button", { name: /^Edit one band/ }));
   expect(screen.getByRole("button", { name: "‹ Equalizer bands" })).toBeTruthy();
-  fireEvent.click(button("Show details"));
+  fireEvent.click(button("Show exact frequency"));
 }
 
 it("edits filter type and exact frequency live, snapping unstable ranges", async () => {
@@ -289,7 +280,7 @@ it("edits the gain and width of the chosen band", async () => {
   await openBand();
   fireEvent.change(screen.getByRole("combobox", { name: "Band" }), { target: { value: "4" } });
   fireEvent.change(screen.getByRole("slider", { name: "Gain" }), { target: { value: "-3" } });
-  fireEvent.change(screen.getByRole("slider", { name: "Width · Q" }), { target: { value: "2" } });
+  fireEvent.change(screen.getByRole("slider", { name: "Bandwidth (Q)" }), { target: { value: "2" } });
   await act(async () => { await controller.flush(); });
   expect(engine.value.state.working.bands[4]).toMatchObject({ gain: -3, q: 2 });
 });
@@ -364,4 +355,158 @@ it("hides the reconnect action until something is wrong", async () => {
   engine.value.audio.error = "The equalizer stopped.";
   await act(async () => { await controller.refresh(); });  // The mount poll may still be reading.
   await waitFor(async () => { await controller.refresh(); expect(screen.getByRole("button", { name: "Reconnect EQ" })).toBeTruthy(); });
+});
+
+it("says Disconnected and locks the controls when the backend stops answering", async () => {
+  const engine = new PreviewEngine(); engine.value.state.enabled = true; engine.value.audio.phase = "active";
+  const { controller } = await setup(engine);
+  vi.spyOn(engine, "status").mockRejectedValue(new Error("backend gone"));
+  await waitFor(async () => { await controller.refresh(); expect(screen.getByText("Disconnected")).toBeTruthy(); });
+  expect(document.querySelector(".deq-dot.live")).toBeNull();
+  expect((screen.getByRole("slider", { name: "Bass · below 120 Hz" }) as HTMLInputElement).disabled).toBe(true);
+  expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+});
+
+it("offers Reconnect when the panel cannot load at all", async () => {
+  const engine = new PreviewEngine();
+  const failing = vi.spyOn(engine, "status").mockRejectedValue(new Error("backend gone"));
+  const controller = new Controller(engine); controllers.push(controller);
+  await controller.refresh();
+  render(<App controller={controller} files={{ importFile: vi.fn(), exportFolder: vi.fn() }} />);
+  await screen.findByText("Could not load DeckyEQ");
+  failing.mockRestore();
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  await screen.findByRole("switch", { name: "Enable EQ" });
+});
+
+it("shows Applying while a change is on its way", async () => {
+  const { engine } = await setup();
+  let release!: () => void;
+  const real = engine.perform.bind(engine);
+  vi.spyOn(engine, "perform").mockImplementationOnce(async (...args) => { await new Promise<void>(r => { release = r; }); return real(...args); });
+  fireEvent.change(screen.getByRole("slider", { name: "Bass · below 120 Hz" }), { target: { value: "2" } });
+  expect(screen.getByText("Applying…")).toBeTruthy();
+  await waitFor(() => expect(release).toBeTypeOf("function"));
+  await act(async () => { release(); });
+  await waitFor(() => expect(screen.queryByText("Applying…")).toBeNull());
+});
+
+it("changes the output and the speakers-only switch independently", async () => {
+  const engine = new PreviewEngine();
+  engine.value.audio.outputs.push({ name: "alsa_output.hdmi", description: "HDMI", port: "hdmi-output-0", speaker: false });
+  const { perform } = await setup(engine);
+  open("Output and level");
+  fireEvent.change(screen.getByRole("combobox", { name: "Apply EQ to" }), { target: { value: "alsa_output.hdmi" } });
+  await waitFor(() => expect(perform).toHaveBeenCalledWith("output", { target: "alsa_output.hdmi", speakers_only: true }, expect.any(Number)));
+  await waitFor(() => expect((screen.getByRole("switch", { name: "Speakers only" }) as HTMLInputElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("switch", { name: "Speakers only" }));
+  await waitFor(() => expect(perform).toHaveBeenCalledWith("output", { target: "alsa_output.hdmi", speakers_only: false }, expect.any(Number)));
+});
+
+it("keeps preset names within the limit, counting characters rather than code units", async () => {
+  await setup();
+  open("Presets");
+  fireEvent.click(button("Save as new…"));
+  const dialog = await screen.findByRole("dialog", { name: "Save as new preset" });
+  const input = dialog.querySelector("input") as HTMLInputElement;
+  fireEvent.change(input, { target: { value: "🎧".repeat(70) } });
+  expect(Array.from(input.value)).toHaveLength(64);
+});
+
+it("explains a waiting EQ with the backend's reason only when it is waiting", async () => {
+  const engine = new PreviewEngine();
+  engine.value.state.enabled = true;
+  engine.value.audio.phase = "standby";
+  engine.value.audio.message = "Standby · Steam is playing to another output.";
+  const { controller } = await setup(engine);
+  expect(screen.queryByText("Enabled; waiting for a suitable output.")).toBeNull();
+  engine.value.audio.phase = "bypassed";
+  engine.value.audio.message = "Bypassed: the selected output is not using its speaker port.";
+  engine.value.revision++;
+  await waitFor(async () => {
+    await controller.refresh();
+    expect(screen.getAllByText("Bypassed: the selected output is not using its speaker port.").length).toBeGreaterThan(0);
+  });
+});
+
+it("labels the chart like the sliders and shows storage problems as alerts", async () => {
+  const engine = new PreviewEngine();
+  engine.value.warning = "Your latest edits could not be saved: Disk full";
+  await setup(engine);
+  expect(screen.getByRole("alert").textContent).toContain("Disk full");
+  expect(document.querySelector(".deq-chart")).toBeNull();  // Not on the main card: its controls do not move it.
+  open("Equalizer bands");
+  expect(screen.getByText("31.5")).toBeTruthy();
+});
+
+it("warns about headphones only when the boost can reach them", async () => {
+  const engine = new PreviewEngine();
+  engine.value.state.enabled = true; engine.value.state.boost = 6; engine.value.state.speakers_only = false;
+  await setup(engine);
+  expect(screen.getByText(/Mind your hearing on headphones/)).toBeTruthy();
+});
+
+it("says when large EQ boosts lower the level, and keeps a raised input level", async () => {
+  const { controller, engine } = await setup();
+  fireEvent.change(screen.getByRole("slider", { name: "Bass · below 120 Hz" }), { target: { value: "9" } });
+  await act(async () => { await controller.flush(); });
+  open("Output and level");
+  expect(screen.getByText(/EQ boosts above \+6 dB lower it by 3\.0 dB/)).toBeTruthy();
+  fireEvent.change(screen.getByRole("slider", { name: "Input level" }), { target: { value: "6" } });
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.audio.effective_preamp).toBeCloseTo(3, 1);  // +6 input kept, -3 for the large boost.
+});
+
+
+it("caps a shelf's Q where it would resonate", async () => {
+  const { controller, engine } = await setup();
+  await openBand();
+  fireEvent.change(screen.getByRole("slider", { name: "Bandwidth (Q)" }), { target: { value: "4" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter type" }), { target: { value: "lowshelf" } });
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.state.working.bands[0]).toMatchObject({ type: "lowshelf", q: 1.4 });
+  expect((screen.getByRole("slider", { name: "Bandwidth (Q)" }) as HTMLInputElement).max).toBe("1.4");
+});
+
+it("toasts any failed action, wherever the panel is scrolled", async () => {
+  const toast = vi.fn();
+  const engine = new PreviewEngine();
+  const { perform } = await setup(engine, toast);
+  perform.mockImplementationOnce(async () => ({ ok: false, error: "Output not connected", state: await engine.status() }));
+  open("Output and level");
+  fireEvent.click(screen.getByRole("switch", { name: "Speakers only" }));
+  await waitFor(() => expect(toast).toHaveBeenCalledWith("Output not connected"));
+});
+
+it("moves a band's frequency with its slider, within the stable range", async () => {
+  const { controller, engine } = await setup();
+  await openBand();
+  const slider = screen.getByRole("slider", { name: /^Frequency/ }) as HTMLInputElement;
+  fireEvent.change(slider, { target: { value: String(Math.log10(1000)) } });
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.state.working.bands[0].frequency).toBe(1000);
+  fireEvent.change(slider, { target: { value: slider.max } });
+  await act(async () => { await controller.flush(); });
+  expect(engine.value.state.working.bands[0].frequency).toBe(20000);
+});
+
+it("shows an audio problem as an alert with a way to reconnect", async () => {
+  const engine = new PreviewEngine();
+  engine.value.audio.error = "PipeWire did not confirm the new EQ settings.";
+  const { perform } = await setup(engine);
+  expect(screen.getByRole("alert").textContent).toContain("did not confirm");
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect EQ" }));
+  await waitFor(() => expect(perform.mock.calls.some(call => call[0] === "refresh")).toBe(true));
+});
+
+it("discards changes after confirmation and offers no Save for built-in presets", async () => {
+  const { controller, engine } = await setup();
+  fireEvent.change(screen.getByRole("slider", { name: "Bass · below 120 Hz" }), { target: { value: "5" } });
+  await act(async () => { await controller.flush(); });
+  open("Presets");
+  expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();  // Flat is built in.
+  expect(screen.getByText(/Built-in presets stay as they are/)).toBeTruthy();
+  fireEvent.click(button("Discard changes"));
+  fireEvent.click(await screen.findByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(engine.value.state.working.bass).toBe(0));
 });

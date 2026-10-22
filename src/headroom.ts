@@ -1,11 +1,9 @@
 import { Band, EQ, limits } from "./types";
 
 // Mirrors deckyeq/graph.py (checked by tests/parity.test.ts against backend-generated vectors).
-/** Manual headroom still caps the peak gain at this many dB (Go S original: ~14.6). */
-export const MAX_BOOST = limits.max_boost;
-const MARGIN = limits.headroom_margin;
-/** With the limiter on, automatic headroom leaves this much boost to it. */
+/** Headroom leaves this much EQ boost to the limiter, which always runs. */
 export const ALLOWANCE = limits.limiter_allowance;
+const MUTED = -96;  // The native stage's lowest level (deckyeq/graph.py).
 const RATE = limits.sample_rate;
 const NYQUIST = RATE / 2;
 const SHELF_Q = Math.SQRT1_2;
@@ -41,12 +39,6 @@ function gainDb(design: Design, hz: number): number {
   return 10 * Math.log10(power(design[0]) / power(design[1]));
 }
 
-/** Response in dB of one filter at each point in Hz. */
-export function responseDb(filter: Filter, points: number[]): number[] {
-  const design = biquad(filter);
-  return points.map(hz => gainDb(design, hz));
-}
-
 /** Highest gain, in dB, of all filters together (bands and tone shelves; without the preamp). */
 export function peakGain(eq: EQ): number {
   const filters: Filter[] = [
@@ -73,15 +65,10 @@ export function peakGain(eq: EQ): number {
   return best;
 }
 
-export function headroom(eq: EQ, boost = 0) {
-  // Widening multiplies the side signal by width: opposite-phase content (L = -R) grows by all of it.
-  // With the limiter on (also when a volume boost forces it), a raised input level is deliberate gain:
-  // only filter boost beyond ALLOWANCE counts, and a lowered input level still counts as room.
-  const shaped = peakGain(eq) + (eq.width > 1 ? 20 * Math.log10(eq.width) : 0);
-  const peak = eq.preamp + shaped;
-  const excess = shaped + Math.min(0, eq.preamp) - ALLOWANCE;
-  const compensation = !eq.auto_headroom ? Math.min(0, MAX_BOOST - peak)
-    : eq.limiter || boost > 0 ? (excess > 0 ? -excess : 0)
-    : peak > 0 ? -(peak + MARGIN) : 0;
+export function headroom(eq: EQ, _boost = 0) {
+  // Only large EQ boosts lower the level; the input level, volume boost and widening never do.
+  const excess = peakGain(eq) + Math.min(0, eq.preamp) - ALLOWANCE;
+  let compensation = excess > 0 ? -excess : 0;
+  compensation = Math.max(compensation, MUTED - eq.preamp);  // The stage cannot go below MUTED.
   return { compensation, effective_preamp: eq.preamp + compensation };
 }

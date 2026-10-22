@@ -25,7 +25,8 @@ from the ZIP (Decky → Developer → Install Plugin from ZIP).
   combined-response headroom (checked against a dense brute-force scan and
   replayed by the frontend), the +15 dB manual cap, settings recovery, deferred
   draft saving, and DeckyEQ 1.0 journal recovery that never blocks EQ.
-- The panel was rebuilt as a main screen (EQ switch, preset, bass, treble) with
+- The panel was rebuilt as a main screen (EQ switch, preset, volume boost, bass,
+  treble, stereo width) with
   rows opening Equalizer bands, Presets, Output and level, and About. UI tests
   cover navigation, B to go back and focus hand-off, the name dialog (refused
   names reopen it), toasts that do not repeat on remount, preset actions, band
@@ -34,7 +35,7 @@ from the ZIP (Decky → Developer → Install Plugin from ZIP).
   still to be checked, in particular that B stays inside the plugin.
 - Stereo width and the look-ahead limiter (native LADSPA stage), measured on
   the Legion Go 2 through the real stereo graph as a smart filter into a float
-  null sink with a -1 dBFS test ceiling (the shipped ceiling is 0 dBFS): a
+  null sink with a -1 dBFS ceiling (shipped since the full audit; briefly 0 dBFS): a
   -1 dBFS 70 Hz tone with +9 dB bass reached +6.93 dBFS without the limiter and
   exactly -1.00 dBFS with it, also when switched on live; THD of a
   boosted 70 Hz tone 0.37–0.63% (the CAPS compressor shipped with SteamOS measured
@@ -43,6 +44,36 @@ from the ZIP (Decky → Developer → Install Plugin from ZIP).
   and confirmed. CPU while playing: 2.1% of one core (1.8% before the stage);
   the volume boost (stage gain before the limiter) is covered by the DSP tests;
   idle remains 0% because the filter suspends with its output.
+- After the full adversarial audit (four independent reviewers: security,
+  backend, DSP, frontend) and a second independent re-audit, measured again on
+  the Legion Go 2: input level in the stage, limiter always on with a 25 ms hold
+  and a -1 dBFS ceiling, the fixed graph (three filters per band slot, so type
+  and preset changes stay live; a one-filter-per-slot variant measured 1.0% CPU
+  but let unequalized audio through on every type change and was reverted).
+  A -1 dBFS tone with +9 dB bass peaked at -1.00 dBFS with 0.02% THD at 70 Hz
+  (0.63% before the audit) and 0.00% at 40 Hz; width, boost and a band switched
+  to a low shelf behaved as computed; a live fade to -96 dB reached -102 dBFS;
+  all 195 controls read back and confirmed; CPU while playing 2.0% of one core.
+  The plugin's start/stop fades and the B button were checked by ear in Game Mode.
+- Two-band limiter, after the user heard dips "on lower notes": at the user's
+  +11.4 dB stage level a single wideband limiter ducked a steady 1 kHz tone by up
+  to 7.8 dB on every 70 Hz bass hit; with the bass band (below 150 Hz) limited on
+  its own 3 dB under the ceiling, by under 2.5 dB, the measurement's floor
+  (tests/test_dsp.py keeps it under 3 dB). The automatic-headroom switch was
+  removed: headroom is always on and changed only ~0.6 dB on the Go S preset.
+- Loudness, after the user found the post-audit build "twice as quiet as no EQ":
+  their Go S preset (+12 dB input, 200% width) in the removed "make room" mode
+  ran the stage at -13.1 dB. With headroom limited to EQ boosts above +6 dB, a
+  music-like test signal measured RMS -13.1 dBFS without EQ, -13.1 with Flat,
+  -8.5 with the factory Go S preset and -8.5 with the user's settings (stage
+  level +11.4 dB), peaks at -1.0 dBFS throughout (Legion Go 2, float null sink).
+- Third full audit (four fresh reviewers) fixed and measured on the Legion Go 2:
+  the limiter's detector now sees peaks between samples (4x oversampled), so a
+  12 kHz tone at 45 degrees with +6 dB boost, whose samples sat at -4.10 dBFS,
+  peaked at -1.08 dBTP (8x-oversampled measurement); boosted bass THD 0.01% at
+  70 Hz, 0.00% at 40 Hz; allowance now 3 dB; all 195 controls confirmed; CPU while
+  playing 2.0% of one core. The plugin's neutral start/stop (filter linked in and
+  out at flat, then stepped to the settings) needs a listening check in Game Mode.
 - Checked on the device (below): routing, DSP level, untouched session, crash
   behaviour, CPU (0% idle, 1.8% of one core while playing) and the Game Mode
   basics. Still open: headphone and Bluetooth transitions, suspend/resume and a

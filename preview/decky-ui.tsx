@@ -16,15 +16,14 @@ export const SliderField = ({ label, description, value, min, max, step, onChang
 export const ToggleField = ({ label, description, checked, onChange, disabled }: any) =>
   <label className="preview-toggle"><div>{label}{description && <small>{description}</small>}</div>
     <input role="switch" aria-label={label} type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} /></label>;
-export const DropdownItem = ({ label, selectedOption, rgOptions, onChange, disabled, strDefaultLabel }: any) =>
-  <label className="preview-dropdown">{label}<select aria-label={label} value={selectedOption} disabled={disabled}
+export const DropdownItem = ({ label, description, selectedOption, rgOptions, onChange, disabled, strDefaultLabel }: any) =>
+  <label className="preview-dropdown">{label}{description && <small>{description}</small>}<select aria-label={label} value={selectedOption} disabled={disabled}
     onChange={event => onChange(rgOptions.find((o: any) => String(o.data) === event.target.value))}>
     {!rgOptions.some((o: any) => o.data === selectedOption) && <option value="">{strDefaultLabel || "Choose…"}</option>}
     {rgOptions.map((o: any) => <option key={String(o.data)} value={o.data}>{o.label}</option>)}
   </select></label>;
 export const TextField = ({ label, value, onChange, disabled, focusOnMount }: any) => <label className="preview-text">{label}<input aria-label={label} value={value} onChange={onChange} disabled={disabled} autoFocus={focusOnMount} /></label>;
 export const ButtonItem = ({ children, onClick, disabled }: any) => <button className="preview-button" onClick={onClick} disabled={disabled}>{children}</button>;
-export const DialogButton = ({ children, className, onClick, disabled, style }: any) => <button className={className} style={style} onClick={onClick} disabled={disabled}>{children}</button>;
 // Escape stands in for the gamepad B button.
 export const Focusable = ({ children, className, onCancelButton }: any) =>
   <div className={className} onKeyDown={event => { if (event.key === "Escape") onCancelButton?.(event); }}>{children}</div>;

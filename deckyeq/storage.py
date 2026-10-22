@@ -12,10 +12,12 @@ from .model import EQError, MAX_IMPORT_BYTES, initial_state, portable_state, val
 
 
 def safe_directory(path: Path):
+    # Only the plugin's own folder must not be a link: links above it are the system's or the user's
+    # choice (/home -> /var/home on Fedora Atomic, ~/homebrew moved to an SD card).
     path = Path(os.path.abspath(path))
+    if path.is_symlink():
+        raise EQError("A settings or export directory is a symbolic link.")
     for part in (path, *path.parents):
-        if part.is_symlink():
-            raise EQError("A settings or export directory is a symbolic link.")
         if part.exists() and not part.is_dir():
             raise EQError("A directory path points to a file.")
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -112,9 +114,17 @@ class PresetFiles:
         except ValueError:
             raise EQError("Choose a path inside your home directory.") from None
         for part in (raw, *raw.parents):
-            if part.is_symlink():
+            # Links inside the home folder are refused; links above it (such as /home itself) are not.
+            if part.is_symlink() and self._below_home(part.parent):
                 raise EQError("Symbolic link paths are not supported for preset exchange.")
         return candidate
+
+    def _below_home(self, folder):
+        try:
+            folder.resolve().relative_to(self.home)
+            return True
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     def read(self, path):
         path = self._inside_home(path)

@@ -1,10 +1,12 @@
 export type FilterType = "peaking" | "lowshelf" | "highshelf";
 export interface Band { frequency: number; gain: number; q: number; type: FilterType }
 export interface EQ {
-  bands: Band[]; bass: number; treble: number; preamp: number; auto_headroom: boolean;
+  bands: Band[]; bass: number; treble: number; preamp: number;
+  /** Kept for preset compatibility; no longer used (headroom is always automatic). */
+  auto_headroom: boolean;
   /** 0 is mono, 1 unchanged, 2 twice the side signal. */
   width: number;
-  /** Look-ahead peak limiter after the filters. */
+  /** Kept for preset compatibility; no longer used (the limiter always runs, boosts stay loud). */
   limiter: boolean;
 }
 export interface Preset { id: string; name: string; eq: EQ; factory?: boolean; description?: string }
@@ -45,7 +47,7 @@ export const flatEQ = (): EQ => ({
 const [stableLow, stableHigh] = limits.stable_frequency;
 export const safeFrequency = (hz: number) =>
   hz > 0 && hz < stableLow ? stableLow : hz > stableHigh && hz < limits.passthrough_frequency ? stableHigh : hz;
-/** Field-wise comparison: backend dictionaries do not keep one key order. */
+/** Field-wise comparison, independent of key order (presets may come from other tools). */
 export const sameEQ = (a: EQ, b?: EQ) => !!b && a.bass === b.bass && a.treble === b.treble &&
   a.preamp === b.preamp && a.auto_headroom === b.auto_headroom && a.width === b.width && a.limiter === b.limiter &&
   a.bands.length === b.bands.length &&

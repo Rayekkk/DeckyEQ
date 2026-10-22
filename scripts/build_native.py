@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE, OUTPUT = "native/deckyeq_dsp.c", "bin/deckyeq_dsp.so"
 FLAGS = ["-std=c11", "-O2", "-fPIC", "-shared", "-fvisibility=hidden", "-Wall", "-Wextra", "-Werror",
-         "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-Wl,-z,relro,-z,now", "-Wl,--as-needed"]
+         "-fstack-protector-strong", "-fstack-clash-protection", "-fcf-protection=full", "-D_FORTIFY_SOURCE=2", "-Wl,-z,relro,-z,now", "-Wl,--as-needed"]
 
 
 def main():
