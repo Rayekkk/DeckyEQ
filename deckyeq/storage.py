@@ -73,11 +73,11 @@ class Store:
                 continue
         raise EQError("Settings could not be read. Existing files were preserved; restore a valid backup before editing.")
 
-    def save(self, state):
+    def save(self, state, backup=True):
         state = validate_state(state)
         # Commit the authoritative file last. A failed write never changes live state.
         # The backup tracks the previously committed state, never a proposed write.
-        if self.path.exists():
+        if backup and self.path.exists():
             try:
                 old = validate_state(read_json(self.path))
             except (OSError, ValueError, UnicodeError, RecursionError):

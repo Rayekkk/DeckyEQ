@@ -1,0 +1,14 @@
+{
+  "frequencies": [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
+  "frequency": [0, 48000],
+  "stable_frequency": [20, 20000],
+  "passthrough_frequency": 24000,
+  "band_gain": [-12, 12],
+  "q": [0.2, 5],
+  "tone_gain": [-9, 9],
+  "bass_frequency": 120,
+  "treble_frequency": 6000,
+  "preamp": [-36, 12],
+  "max_boost": 24,
+  "name_length": 64
+}

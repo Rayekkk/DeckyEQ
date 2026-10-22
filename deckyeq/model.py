@@ -5,8 +5,11 @@ import copy
 import json
 import re
 import uuid
+from pathlib import Path
 
-FREQUENCIES = (31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
+# One source for limits shared with the frontend (src/ imports the same file).
+LIMITS = json.loads(Path(__file__).with_name("limits.json").read_text(encoding="utf-8"))
+FREQUENCIES = tuple(LIMITS["frequencies"])
 MAX_PRESETS = 64
 MAX_IMPORT_BYTES = 256 * 1024
 SCHEMA_VERSION = 2
@@ -26,18 +29,19 @@ def number(value, low, high, label):
 
 
 def frequency(value, legacy=False):
-    hz = number(value, 20 if legacy else 0, 20000 if legacy else 48000, "Frequency")
+    low, high = LIMITS["stable_frequency"]
+    hz = number(value, *((low, high) if legacy else LIMITS["frequency"]), "Frequency")
     # PipeWire's float32 biquads are unstable below ~6 Hz and just under Nyquist.
     # 0 Hz and >= 24 kHz become constant gains at 44.1/48 kHz and stay valid for old presets.
-    if 0 < hz < 20:
-        return 20.0
-    if 20000 < hz < 24000:
-        return 20000.0
+    if 0 < hz < low:
+        return float(low)
+    if high < hz < LIMITS["passthrough_frequency"]:
+        return float(high)
     return hz
 
 
 def name(value):
-    if (not isinstance(value, str) or not 1 <= len(value.strip()) <= 64 or
+    if (not isinstance(value, str) or not 1 <= len(value.strip()) <= LIMITS["name_length"] or
             any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
         raise EQError("Preset names must contain 1–64 printable characters.")
     return value.strip()
@@ -78,13 +82,14 @@ def validate_eq(value, legacy=False):
         if kind not in FILTER_TYPES:
             raise EQError(f"Band {i + 1} has an unsupported filter type.")
         cleaned.append({"type": kind, "frequency": frequency(band["frequency"], legacy),
-                        "gain": number(band["gain"], -12, 12, "Band gain"),
-                        "q": number(band["q"], 0.2, 5, "Band Q")})
+                        "gain": number(band["gain"], *LIMITS["band_gain"], "Band gain"),
+                        "q": number(band["q"], *LIMITS["q"], "Band Q")})
     if type(value["auto_headroom"]) is not bool:
         raise EQError("Automatic headroom must be on or off.")
-    return {"bands": cleaned, "bass": number(value["bass"], -9, 9, "Bass"),
-            "treble": number(value["treble"], -9, 9, "Treble"),
-            "preamp": number(value["preamp"], -36, 0 if legacy else 12, "Preamp"),
+    low, high = LIMITS["preamp"]
+    return {"bands": cleaned, "bass": number(value["bass"], *LIMITS["tone_gain"], "Bass"),
+            "treble": number(value["treble"], *LIMITS["tone_gain"], "Treble"),
+            "preamp": number(value["preamp"], low, 0 if legacy else high, "Preamp"),
             "auto_headroom": value["auto_headroom"]}
 
 

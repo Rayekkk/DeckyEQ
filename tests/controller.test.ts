@@ -99,3 +99,32 @@ describe("serialized live edits", () => {
     expect(h.transport.perform).not.toHaveBeenCalled();
   });
 });
+
+describe("polling", () => {
+  it("does not re-render when the backend state is unchanged", async () => {
+    const h = harness(); await h.controller.refresh();
+    const listener = vi.fn();
+    h.controller.subscribe(listener);
+    await h.controller.refresh();
+    expect(listener).not.toHaveBeenCalled();
+    h.state = { ...h.state, revision: h.state.revision + 1 };
+    await h.controller.refresh();
+    expect(listener).toHaveBeenCalledTimes(1);
+    h.controller.dispose();
+  });
+});
+
+describe("failed writes", () => {
+  it("keeps telling the user that a change was not confirmed after reconnecting", async () => {
+    const h = harness(); await h.controller.refresh();
+    vi.mocked(h.transport.perform).mockRejectedValueOnce(new Error("socket closed"));
+    h.controller.edit({ ...flatEQ(), bass: 5 });
+    await h.controller.flush();
+    expect(h.controller.getSnapshot().error).toBe("Change not confirmed. socket closed");
+    await h.controller.refresh();
+    expect(h.controller.getSnapshot().connected).toBe(true);
+    expect(h.controller.getSnapshot().error).toContain("not confirmed");
+    expect(h.controller.getSnapshot().snapshot!.state.working.bass).toBe(0);
+    h.controller.dispose();
+  });
+});

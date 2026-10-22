@@ -1,5 +1,8 @@
-import { cloneEQ, EQ, Result, Snapshot, Transport, View } from "./types";
+import { cloneEQ, EQ, Result, sameEQ, Snapshot, Transport, View } from "./types";
 import { headroom } from "./headroom";
+
+const text = (error: unknown) => error instanceof Error ? error.message : String(error);
+const UNCONFIRMED = "Your last change was not confirmed. The controls now show the sound DeckyEQ is using.";
 
 /** One queue survives QAM remounts. Slider writes are coalesced, never concurrent. */
 export class Controller {
@@ -11,6 +14,7 @@ export class Controller {
   private reading: Promise<void> | null = null;
   private epoch = 0;
   private disposed = false;
+  private unconfirmed = false;  // A write failed in transit; say so once the backend is back.
   constructor(private transport: Transport) {}
 
   getSnapshot = (): View => this.view;
@@ -21,7 +25,7 @@ export class Controller {
     this.listeners.forEach(listener => listener());
   }
   clearMessage = () => this.publish({ error: null, note: null });
-  reportError = (error: unknown) => this.publish({ error: error instanceof Error ? error.message : String(error) });
+  reportError = (error: unknown) => this.publish({ error: text(error) });
 
   refresh = async (): Promise<void> => {
     if (this.disposed || this.view.busy || this.desired || this.drain || this.reading) return;
@@ -29,11 +33,16 @@ export class Controller {
     const request = (async () => {
       try {
         const snapshot = await this.transport.status();
-        if (epoch === this.epoch && !this.disposed)
-          this.publish({ snapshot, connected: true, error: this.view.connected ? this.view.error : null });
+        // An unchanged poll must not re-render the whole panel every 1.8 s.
+        const unchanged = this.view.connected && JSON.stringify(snapshot) === JSON.stringify(this.view.snapshot);
+        if (epoch === this.epoch && !this.disposed && !unchanged) {
+          this.publish({ snapshot, connected: true,
+            error: this.view.connected ? this.view.error : this.unconfirmed ? UNCONFIRMED : null });
+          this.unconfirmed = false;
+        }
       } catch (error) {
         if (epoch === this.epoch && !this.disposed)
-          this.publish({ connected: false, error: `Could not reach DeckyEQ. ${String(error)}` });
+          this.publish({ connected: false, error: `Could not reach DeckyEQ. ${text(error)}` });
       }
     })();
     this.reading = request;
@@ -53,7 +62,7 @@ export class Controller {
   private optimistic(snapshot: Snapshot, eq: EQ): Snapshot {
     const preset = snapshot.presets.find(p => p.id === snapshot.state.selected);
     return { ...snapshot, state: { ...snapshot.state, working: cloneEQ(eq) },
-      dirty: JSON.stringify(eq) !== JSON.stringify(preset?.eq),
+      dirty: !sameEQ(eq, preset?.eq),
       audio: { ...snapshot.audio, ...headroom(eq) } };
   }
 
@@ -80,7 +89,8 @@ export class Controller {
         this.publish({ snapshot: this.desired ? this.optimistic(result.state, this.desired) : result.state, connected: true });
       } catch (error) {
         this.desired = null;
-        this.publish({ error: `Change not confirmed. ${String(error)}`, connected: false, saving: false });
+        this.unconfirmed = true;
+        this.publish({ error: `Change not confirmed. ${text(error)}`, connected: false, saving: false });
         return;
       }
     }
@@ -102,8 +112,8 @@ export class Controller {
       else this.publish({ note: result.path ? `Exported to ${result.path}` : result.message || null });
       return result;
     } catch (error) {
-      this.publish({ error: String(error), connected: false });
-      return { ok: false, error: String(error) };
+      this.publish({ error: text(error), connected: false });
+      return { ok: false, error: text(error) };
     } finally { this.publish({ busy: false }); }
   };
 

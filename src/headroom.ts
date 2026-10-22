@@ -1,4 +1,4 @@
-import { EQ } from "./types";
+import { EQ, limits } from "./types";
 
 /** Mirrors the backend's analytic shelf bound for optimistic UI values. */
 export function shelfPeak(gain: number, q: number): number {
@@ -14,7 +14,7 @@ export function shelfPeak(gain: number, q: number): number {
 }
 
 /** Mirrors graph.MAX_BOOST: manual headroom still caps the summed peak gain. */
-export const MAX_BOOST = 24;
+export const MAX_BOOST = limits.max_boost;
 
 export function headroom(eq: EQ) {
   const boost = eq.bands.reduce((sum, band) => sum + (band.type === "peaking" ? Math.max(0, band.gain) : shelfPeak(band.gain, band.q)), 0)

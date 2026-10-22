@@ -30,7 +30,7 @@ REQUEST_TIMEOUT = 6
 METADATA_SECONDS = 20
 DOWNLOAD_SECONDS = 120
 CACHE_SECONDS = 60
-ERROR_CACHE_SECONDS = 20
+ERROR_CACHE_SECONDS = 5  # Short, so Try again after a network error really retries.
 CLICK_CACHE_SECONDS = 2
 CA_BUNDLES = (
     "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem",
@@ -261,68 +261,84 @@ class PluginUpdates:
 
     @staticmethod
     def _validate_archive(stream, version, cancel=None):
+        """Check names, sizes, CRCs and manifests without extracting or executing anything."""
         stream.seek(0)
         with zipfile.ZipFile(stream) as archive:
             members = archive.infolist()
-            if not members or len(members) > MAX_MEMBERS:
-                raise ValueError("The release ZIP has too many entries or is empty.")
-            seen = set()
-            files = set()
-            total = 0
-            for member in members:
-                name = member.filename
-                parts = name.rstrip("/").split("/")
-                mode = member.external_attr >> 16
-                if (not name or len(name) > 1024 or "\\" in name or ":" in name or
-                        member.orig_filename != name or any(ord(c) < 32 or ord(c) == 127 for c in name) or
-                        any(part in ("", ".", "..") for part in parts) or parts[0] != ARCHIVE_ROOT or
-                        name.casefold().rstrip("/") in seen or member.flag_bits & 1 or
-                        (stat.S_IFMT(mode) and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))) or
-                        (len(parts) == 1 and not member.is_dir()) or
-                        member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
-                    raise ValueError("The release ZIP contains an unsafe or unsupported entry.")
-                seen.add(name.casefold().rstrip("/"))
-                if not member.is_dir():
-                    files.add(name.casefold())
-                total += member.file_size
-                if member.file_size < 0 or total > MAX_EXPANDED:
-                    raise ValueError("The release ZIP expands beyond the size limit.")
-            for name in seen:
-                parts = name.split("/")
-                if any("/".join(parts[:index]) in files for index in range(1, len(parts))):
-                    raise ValueError("The release ZIP contains conflicting file and directory paths.")
-            # Validate all CRCs and actual decompressed sizes without extracting or executing anything.
-            for member in members:
-                count = 0
-                with archive.open(member) as entry:
-                    while chunk := entry.read(65536):
-                        if cancel:
-                            cancel()
-                        count += len(chunk)
-                        if count > member.file_size:
-                            raise ValueError("The release ZIP has an invalid entry size.")
-                if count != member.file_size:
-                    raise ValueError("The release ZIP is incomplete.")
-            for required in ("main.py", "dist/index.js", "plugin.json", "package.json"):
-                info = archive.getinfo(f"{ARCHIVE_ROOT}/{required}")
-                if info.is_dir() or info.file_size == 0:
-                    raise ValueError("The release ZIP is missing a required plugin file.")
-            for filename in ("plugin.json", "package.json"):
-                name = f"{ARCHIVE_ROOT}/{filename}"
-                if archive.getinfo(name).file_size > 65536:
-                    raise ValueError("The release manifest is too large.")
-                manifest = _json_object(archive.read(name))
-                if manifest.get("version") != version:
-                    raise ValueError("The release ZIP version does not match the GitHub release.")
-                if filename == "plugin.json":
-                    if (manifest.get("name") != PLUGIN_NAME or
-                            manifest.get("flags", []) != [] or
-                            manifest.get("main", "main.py") != "main.py" or
-                            manifest.get("bin", "dist/index.js") != "dist/index.js"):
-                        raise ValueError("The release ZIP contains a different plugin or entry point.")
-                elif manifest.get("name") != "deckyeq":
-                    raise ValueError("The release ZIP contains a different package.")
+            PluginUpdates._check_entries(members)
+            PluginUpdates._check_contents(archive, members, cancel)
+            PluginUpdates._check_manifests(archive, version)
         stream.seek(0)
+
+    @staticmethod
+    def _unsafe_entry(member):
+        name = member.filename
+        parts = name.rstrip("/").split("/")
+        mode = member.external_attr >> 16
+        return (not name or len(name) > 1024 or "\\" in name or ":" in name or
+                member.orig_filename != name or any(ord(c) < 32 or ord(c) == 127 for c in name) or
+                any(part in ("", ".", "..") for part in parts) or parts[0] != ARCHIVE_ROOT or
+                member.flag_bits & 1 or
+                (stat.S_IFMT(mode) and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))) or
+                (len(parts) == 1 and not member.is_dir()) or
+                member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED))
+
+    @staticmethod
+    def _check_entries(members):
+        if not members or len(members) > MAX_MEMBERS:
+            raise ValueError("The release ZIP has too many entries or is empty.")
+        seen, files, total = set(), set(), 0
+        for member in members:
+            key = member.filename.casefold().rstrip("/")
+            if PluginUpdates._unsafe_entry(member) or key in seen:
+                raise ValueError("The release ZIP contains an unsafe or unsupported entry.")
+            seen.add(key)
+            if not member.is_dir():
+                files.add(member.filename.casefold())
+            total += member.file_size
+            if member.file_size < 0 or total > MAX_EXPANDED:
+                raise ValueError("The release ZIP expands beyond the size limit.")
+        for name in seen:
+            parts = name.split("/")
+            if any("/".join(parts[:index]) in files for index in range(1, len(parts))):
+                raise ValueError("The release ZIP contains conflicting file and directory paths.")
+
+    @staticmethod
+    def _check_contents(archive, members, cancel):
+        # Reading every entry validates CRCs and the actual decompressed sizes.
+        for member in members:
+            count = 0
+            with archive.open(member) as entry:
+                while chunk := entry.read(65536):
+                    if cancel:
+                        cancel()
+                    count += len(chunk)
+                    if count > member.file_size:
+                        raise ValueError("The release ZIP has an invalid entry size.")
+            if count != member.file_size:
+                raise ValueError("The release ZIP is incomplete.")
+
+    @staticmethod
+    def _check_manifests(archive, version):
+        for required in ("main.py", "dist/index.js", "plugin.json", "package.json"):
+            info = archive.getinfo(f"{ARCHIVE_ROOT}/{required}")
+            if info.is_dir() or info.file_size == 0:
+                raise ValueError("The release ZIP is missing a required plugin file.")
+        for filename in ("plugin.json", "package.json"):
+            name = f"{ARCHIVE_ROOT}/{filename}"
+            if archive.getinfo(name).file_size > 65536:
+                raise ValueError("The release manifest is too large.")
+            manifest = _json_object(archive.read(name))
+            if manifest.get("version") != version:
+                raise ValueError("The release ZIP version does not match the GitHub release.")
+            if filename == "plugin.json":
+                if (manifest.get("name") != PLUGIN_NAME or
+                        manifest.get("flags", []) != [] or
+                        manifest.get("main", "main.py") != "main.py" or
+                        manifest.get("bin", "dist/index.js") != "dist/index.js"):
+                    raise ValueError("The release ZIP contains a different plugin or entry point.")
+            elif manifest.get("name") != "deckyeq":
+                raise ValueError("The release ZIP contains a different package.")
 
     def _open_home(self):
         if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
@@ -487,6 +503,9 @@ class PluginUpdates:
                 return {"success": True, "path": path, "version": release["version"],
                         "sha256": release["sha256"]}
             except Exception as error:
-                message = (str(error) if isinstance(error, ValueError) else
-                           "The release ZIP could not be downloaded safely. Check the connection and Downloads folder.")
+                if isinstance(error, (zipfile.BadZipFile, KeyError)):
+                    message = "The release ZIP is damaged or incomplete. Try again later."
+                else:
+                    message = (str(error) if isinstance(error, ValueError) else
+                               "The release ZIP could not be downloaded safely. Check the connection and Downloads folder.")
                 return {"success": False, "error": message}

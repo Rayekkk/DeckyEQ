@@ -1,0 +1,327 @@
+{
+  "version": "0.0.0",
+  "revision": 3,
+  "state": {
+    "version": 2,
+    "enabled": false,
+    "target": "",
+    "speakers_only": true,
+    "selected": "flat",
+    "working": {
+      "bands": [
+        {
+          "type": "peaking",
+          "frequency": 31.5,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 63.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 125.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 250.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 500.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 1000.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 2000.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 4000.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 8000.0,
+          "gain": 0.0,
+          "q": 1.4
+        },
+        {
+          "type": "peaking",
+          "frequency": 16000.0,
+          "gain": 0.0,
+          "q": 1.4
+        }
+      ],
+      "bass": 0.0,
+      "treble": 0.0,
+      "preamp": 0.0,
+      "auto_headroom": true
+    }
+  },
+  "presets": [
+    {
+      "id": "flat",
+      "name": "Flat",
+      "eq": {
+        "bands": [
+          {
+            "frequency": 31.5,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 63.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 125.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 250.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 500.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 1000.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 2000.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 4000.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 8000.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          },
+          {
+            "frequency": 16000.0,
+            "gain": 0.0,
+            "q": 1.4,
+            "type": "peaking"
+          }
+        ],
+        "bass": 0.0,
+        "treble": 0.0,
+        "preamp": 0.0,
+        "auto_headroom": true
+      },
+      "factory": true
+    },
+    {
+      "id": "go-s-original",
+      "name": "Legion Go S · Original",
+      "eq": {
+        "bands": [
+          {
+            "type": "lowshelf",
+            "frequency": 31.25,
+            "gain": -10.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 0.0,
+            "gain": -4.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 125.0,
+            "gain": 5.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 250.0,
+            "gain": 5.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 500.0,
+            "gain": -5.0,
+            "q": 1.0
+          },
+          {
+            "type": "highshelf",
+            "frequency": 1000.0,
+            "gain": -5.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 2000.0,
+            "gain": -5.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 40000.0,
+            "gain": -5.0,
+            "q": 1.0
+          },
+          {
+            "type": "highshelf",
+            "frequency": 48000.0,
+            "gain": 0.0,
+            "q": 1.0
+          },
+          {
+            "type": "peaking",
+            "frequency": 16000.0,
+            "gain": 0.0,
+            "q": 1.0
+          }
+        ],
+        "bass": 0.0,
+        "treble": 0.0,
+        "preamp": 8.0,
+        "auto_headroom": false
+      },
+      "factory": true,
+      "description": "Community speaker preset by GAZuOOT. Original +8 dB input boost; automatic headroom is off. Lower playback volume if it distorts."
+    },
+    {
+      "id": "00000000000000000000000000000000",
+      "name": "Warm",
+      "eq": {
+        "bands": [
+          {
+            "type": "lowshelf",
+            "frequency": 31.5,
+            "gain": -3.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 63.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 125.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 250.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 500.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 1000.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 2000.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 4000.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 8000.0,
+            "gain": 0.0,
+            "q": 1.4
+          },
+          {
+            "type": "peaking",
+            "frequency": 16000.0,
+            "gain": 0.0,
+            "q": 1.4
+          }
+        ],
+        "bass": 0.0,
+        "treble": 0.0,
+        "preamp": 0.0,
+        "auto_headroom": true
+      }
+    }
+  ],
+  "dirty": false,
+  "audio": {
+    "supported": true,
+    "phase": "off",
+    "message": "EQ is off. Your presets are kept.",
+    "error": null,
+    "outputs": [
+      {
+        "name": "alsa_output.speakers",
+        "description": "Speakers",
+        "speaker": true,
+        "port": "analog-output-speaker"
+      },
+      {
+        "name": "bluez_output.headset",
+        "description": "Bluetooth",
+        "speaker": false,
+        "port": ""
+      }
+    ],
+    "default": "alsa_output.speakers",
+    "compensation": 0.0,
+    "effective_preamp": 0.0
+  },
+  "warning": null,
+  "home": "/home/deck",
+  "export_directory": "/home/deck/Documents/DeckyEQ"
+}

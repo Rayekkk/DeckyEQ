@@ -5,7 +5,7 @@ import goS from "../presets/legion-go-s-original.json";
 
 export function seed(): Snapshot {
   return { version: "1.0.0", revision: 0, state: { version: 2, enabled: false, target: "alsa_output.preview",
-    speakers_only: true, selected: "flat", working: flatEQ(), presets: [] },
+    speakers_only: true, selected: "flat", working: flatEQ() },
     presets: [{ id: "flat", name: "Flat", eq: flatEQ(), factory: true },
       { id: "go-s-original", name: goS.preset.name, eq: goS.preset.eq as EQ, factory: true,
         description: "Community speaker preset by GAZuOOT. Original +8 dB input boost; automatic headroom is off. Lower playback volume if it distorts." }], dirty: false,
@@ -37,7 +37,6 @@ export class PreviewEngine implements Transport {
     if (action === "revert") state.working = cloneEQ(selected().eq);
     if (action === "reset") state.working = flatEQ();
     if (action === "import") value.presets.push({ id: crypto.randomUUID(), name: "Imported preview", eq: flatEQ() });
-    state.presets = value.presets.filter(p => !p.factory);
     value.dirty = JSON.stringify(state.working) !== JSON.stringify(selected().eq);
     value.audio.phase = state.enabled ? "active" : "off";
     value.audio.message = state.enabled ? "Live EQ · Legion Go 2 speakers" : "EQ is off. Your presets are kept.";

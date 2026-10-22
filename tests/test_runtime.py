@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -18,6 +19,14 @@ class Process:
         self.stderr = asyncio.StreamReader()
         self.stderr.feed_eof()
     def terminate(self): self.returncode = 0
+    def kill(self): self.returncode = -9
+    async def wait(self): return self.returncode
+
+
+class Subscriber:
+    def __init__(self):
+        self.returncode = None
+        self.stdout = asyncio.StreamReader()
     def kill(self): self.returncode = -9
     async def wait(self): return self.returncode
 
@@ -288,6 +297,36 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"target": "bluez_output.gone", "port": "", "force": False, "level": level}]}), encoding="utf-8")
         await self.runtime.stop()
         self.assertTrue(self.runtime.journal.exists())
+
+    async def test_edit_starts_from_a_recent_readback_but_still_verifies(self):
+        await self.start()
+        await self.runtime.scan()
+        self.runtime.commands.clear()
+        eq = flat_eq()
+        eq["bass"] = 2
+        await self.runtime.apply(eq)
+        self.assertEqual(sum(command[0] == "pw-dump" for command in self.runtime.commands), 2)
+        self.assertEqual(self.runtime.actual["bass:Gain"], 2)
+        self.runtime.reject_controls = True
+        eq["bass"] = 4
+        with self.assertRaises(EQError): await self.runtime.apply(eq)
+
+    async def test_monitor_wakes_on_output_events_and_ignores_stream_noise(self):
+        subscriber = Subscriber()
+        self.mock_spawn.side_effect = lambda *a, **kw: subscriber
+        self.addAsyncCleanup(self.runtime.close_events)
+        subscriber.stdout.feed_data(b"Event 'new' on sink-input #12\n")
+        self.assertFalse(await self.runtime.wait_for_change(0.2))
+        subscriber.stdout.feed_data(b"Event 'change' on server #4294967295\nEvent 'change' on sink #3\n")
+        started = time.monotonic()
+        self.assertTrue(await self.runtime.wait_for_change(5))
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(self.mock_spawn.call_args.args[1:], ("subscribe",))
+        self.assertEqual(self.mock_spawn.call_count, 1)  # One long-lived subscription.
+        subscriber.stdout.feed_eof()
+        with patch("deckyeq.runtime.POLL_SECONDS", 0):
+            self.assertTrue(await self.runtime.wait_for_change(5))
+        self.assertIsNone(self.runtime.subscriber)
 
     async def test_external_control_drift_repaired(self):
         await self.start()

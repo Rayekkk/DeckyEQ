@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from .model import validate_eq
+from .model import FREQUENCIES, LIMITS, validate_eq
 
 SINK_NAME = "deckyeq.sink"
 PLAYBACK_NAME = "deckyeq.playback"
@@ -10,7 +10,7 @@ SHELF_Q = 2 ** -0.5
 VARIANTS = (("peaking", ""), ("lowshelf", "_low"), ("highshelf", "_high"))
 # Manual headroom still caps the summed peak gain, so an imported preset cannot add
 # extreme boost while the hardware is at 100%. The Go S original sums to about 19 dB.
-MAX_BOOST = 24.0
+MAX_BOOST = float(LIMITS["max_boost"])
 
 
 def shelf_peak(gain, q):
@@ -45,8 +45,8 @@ def headroom(eq):
 def controls(eq):
     eq = validate_eq(eq)
     result = {"level:Mult": 10 ** (headroom(eq)["effective_preamp"] / 20), "level:Add": 0.0,
-              "bass:Freq": 120.0, "bass:Q": SHELF_Q, "bass:Gain": eq["bass"],
-              "treble:Freq": 6000.0, "treble:Q": SHELF_Q, "treble:Gain": eq["treble"]}
+              "bass:Freq": float(LIMITS["bass_frequency"]), "bass:Q": SHELF_Q, "bass:Gain": eq["bass"],
+              "treble:Freq": float(LIMITS["treble_frequency"]), "treble:Q": SHELF_Q, "treble:Gain": eq["treble"]}
     for i, band in enumerate(eq["bands"]):
         for kind, suffix in VARIANTS:
             result[f"band{i}{suffix}:Freq"] = band["frequency"]
@@ -65,7 +65,7 @@ def filter_config(eq, target, owner):
     specs = [("level", "linear"), ("bass", "bq_lowshelf")]
     # Each slot has three serial native filters. Inactive types have 0 dB gain,
     # so changing type is a live control update, without rebuilding the graph.
-    specs += [(f"band{i}{suffix}", "bq_" + kind) for i in range(10) for kind, suffix in VARIANTS]
+    specs += [(f"band{i}{suffix}", "bq_" + kind) for i in range(len(FREQUENCIES)) for kind, suffix in VARIANTS]
     specs += [("treble", "bq_highshelf")]
     nodes = [{"type": "builtin", "name": key, "label": label,
               "control": {name.split(":", 1)[1]: value for name, value in values.items()

@@ -41,7 +41,7 @@ class UpdateLifecycle(unittest.IsolatedAsyncioTestCase):
             with patch.dict("os.environ", DECKY_PLUGIN_VERSION=""):
                 result = await self.plugin.updates_check()
             self.assertTrue(result["success"])
-            self.assertEqual(result["current_version"], "1.0.0")
+            self.assertEqual(result["current_version"], json.loads((ROOT / "package.json").read_text())["version"])
             self.assertFalse(result["download_available"])
         await self.plugin._unload()
         self.assertTrue(updater._closed.is_set())
@@ -79,7 +79,6 @@ class UpdateLifecycle(unittest.IsolatedAsyncioTestCase):
         manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], package["version"])
-        self.assertEqual(package["version"], "1.0.0")
         self.assertEqual(package["license"], "BSD-3-Clause")
         self.assertEqual(manifest["flags"], [])
         self.assertIn("Copyright (c) 2026, Rayekkk", (ROOT / "LICENSE").read_text())

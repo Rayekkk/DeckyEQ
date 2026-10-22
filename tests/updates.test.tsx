@@ -1,6 +1,9 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { UpdateCheck, UpdateClient, UpdateController, UpdateDownload, UpdateSection } from "../src/updates";
+import { version } from "../package.json";
+
+const installed = new RegExp(`Installed version: ${version.replace(/\./g, "\.")}`);
 
 const sessions: UpdateController[] = [];
 afterEach(() => { cleanup(); sessions.splice(0).forEach(session => session.dispose()); });
@@ -24,7 +27,7 @@ async function click(label: string) {
 it("checks only on request and handles an unpublished repository", async () => {
   const { client } = setup();
   expect(client.check).not.toHaveBeenCalled();
-  expect(screen.getByText(/Installed version: 1.0.0/)).toBeTruthy();
+  expect(screen.getByText(installed)).toBeTruthy();
   await click("Check for Updates");
   expect(client.check).toHaveBeenCalledOnce();
   expect(screen.getByText("No public release yet")).toBeTruthy();
@@ -61,7 +64,8 @@ it("does not offer a download for equal, older or unverifiable releases", async 
   await click("Check for Updates");
   expect(screen.getByText("No newer release")).toBeTruthy();
   await click("Check for Updates");
-  expect(screen.getByRole("alert").textContent).toBe("Missing trusted digest.");
+  expect(screen.getByText(/Missing trusted digest\./)).toBeTruthy();  // A note about the release, not a failure.
+  expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByRole("button", { name: /Download/ })).toBeNull();
 });
 
@@ -101,7 +105,7 @@ it("ignores completion from an unloaded plugin session", async () => {
   setup();
   await act(async () => pending.resolve(available));
   expect(screen.queryByRole("button", { name: /Download/ })).toBeNull();
-  expect(screen.getByText(/Installed version: 1.0.0/)).toBeTruthy();
+  expect(screen.getByText(installed)).toBeTruthy();
 });
 
 it("removes a stale download notice when the public release changes", async () => {

@@ -28,6 +28,10 @@ class FakeRuntime:
     @property
     def running(self): return self.process is not None
     async def recover(self): self.events.append("recover")
+    async def wait_for_change(self, timeout):
+        await asyncio.sleep(1.5)
+        return True
+    async def close_events(self): self.events.append("close_events")
     async def scan(self): return self.outputs, self.default
     async def start(self, eq, target):
         self.events.append("start")
@@ -117,6 +121,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.action("edit", {"eq": flat_eq()}, 0)
         self.assertFalse(result["ok"])
         self.assertEqual(result["state"]["presets"][-1]["name"], "New")
+        self.assertNotIn("presets", result["state"]["state"])
 
     async def test_headphone_port_bypasses_then_speakers_resume(self):
         await self.act("enable", enabled=True)
@@ -135,6 +140,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         eq = flat_eq()
         eq["treble"] = 3
         await self.act("edit", eq=eq)
+        self.assertEqual(self.runtime.default, "bluez_output.headset")
+        await self.service._sync(self.service.data)  # The monitor handles the output-change event.
         self.assertFalse(self.runtime.running)
         self.assertEqual(self.runtime.default, "bluez_output.headset")
         self.assertEqual(self.service.phase, "bypassed")
@@ -177,7 +184,17 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.phase, "off")
         with patch.object(self.runtime, "scan", wraps=self.runtime.scan) as scan:
             await self.service.status()
-        scan.assert_awaited_once()
+        scan.assert_not_awaited()  # Audio events refresh the output list instead.
+
+    async def test_slider_edit_skips_output_rescan(self):
+        await self.act("enable", enabled=True)
+        eq = flat_eq()
+        eq["bass"] = 2
+        with patch.object(self.runtime, "scan", side_effect=AssertionError("rescanned")), \
+                patch.object(self.store, "save", wraps=self.store.save) as save:
+            self.assertTrue((await self.act("edit", eq=eq))["ok"])
+        self.assertEqual(self.runtime.eq["bass"], 2)
+        self.assertFalse(save.call_args.kwargs["backup"])
 
     async def test_repeated_failures_back_off_up_to_a_minute(self):
         delays = []
@@ -268,6 +285,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.act("delete")
         self.assertEqual(self.service.data["selected"], "flat")
         self.assertEqual(self.service.data["working"], flat_eq())
+
+    async def test_confirmation_for_another_preset_is_rejected(self):
+        await self.act("save_as", name="Keep me")
+        kept = self.service.data["selected"]
+        result = await self.act("delete", id="flat")
+        self.assertFalse(result["ok"])
+        self.assertEqual([p["id"] for p in self.service.data["presets"]], [kept])
+        self.assertTrue((await self.act("delete", id=kept))["ok"])
 
     async def test_flat_cannot_be_overwritten_renamed_or_deleted(self):
         for action in ("save", "rename", "delete"):

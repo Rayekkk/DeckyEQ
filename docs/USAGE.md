@@ -4,7 +4,7 @@
 
 ## Installation and first use
 
-1. Install `artifacts/DeckyEQ-1.0.0.zip` using Decky's local ZIP installation
+1. Install the release `DeckyEQ-<version>.zip` (or `artifacts/DeckyEQ-<version>.zip` from `npm run package`) using Decky's local ZIP installation
    option in its developer settings.
 2. Open **DeckyEQ** in the quick-access menu. Enable **Enable EQ**. The first
    activation selects the current speaker output if possible. If no suitable
@@ -126,10 +126,11 @@ Nyquist has no effect.
 **Speaker port only** is enabled initially. It checks the actual selected
 output's active port; a missing/unknown port is bypassed rather than guessed.
 Turn it off if you deliberately want to EQ a selected headset, USB device or
-HDMI output. While EQ is enabled, the monitor checks routes approximately every
-1.5 seconds, plus command time (while it is off, the output list refreshes only
-while the panel is open); a full PipeWire control readback runs every 15 seconds or
-immediately when DeckyEQ's output disappears. Every edit is read back at once.
+HDMI output. The monitor listens to PulseAudio events (`pactl subscribe`) and
+reacts to output, card and server changes about 0.15 seconds after a burst of
+events settles. Without events it checks every 15 seconds, including a full
+PipeWire control readback while EQ is active; if the event stream is unavailable
+it falls back to checking every 1.5 seconds. Every edit is read back at once.
 After a failure, retries wait 8, 16, 32 and then 60 seconds. This is a software polling guard, not an instantaneous hardware
 interlock; there can be a short transition before bypass.
 

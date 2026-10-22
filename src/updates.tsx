@@ -66,7 +66,8 @@ export class UpdateController {
       if (kind === "check") {
         const result = await this.client.check();
         if (!result.success) throw new Error(result.error || "Could not check GitHub releases. Try again.");
-        this.publish({ ...this.state, check: result, error: result.error,
+        // A successful check may carry a note (e.g. no ZIP yet); statusText shows it, not the error alert.
+        this.publish({ ...this.state, check: result, error: undefined,
           download: this.state.download?.version === result.latest_version ? this.state.download : undefined });
       } else {
         const result = await this.client.download(expected!);
@@ -88,7 +89,7 @@ function statusText(check?: UpdateCheck): [string, string] {
   if (!check) return ["GitHub releases", `Installed version: ${installed}. Check for updates when you need them.`];
   if (check.no_release) return ["No public release yet", `Installed version: ${installed}. A download will appear after a release is published on GitHub.`];
   if (check.update_available) {
-    if (!check.download_available) return ["New release found", `Version ${check.latest_version} has no verified installation ZIP yet. Check again later.`];
+    if (!check.download_available) return ["New release found", `Version ${check.latest_version}: ${check.error || "no verified installation ZIP yet"}. Check again later.`];
     const size = check.size ? ` (${(check.size / 1048576).toFixed(1)} MB)` : "";
     return ["Update available", `Version ${check.latest_version}${size}. Download the release ZIP from GitHub.`];
   }
