@@ -26,6 +26,18 @@ class UpdateLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.plugin.updates_download("1.0.1"))["success"])
         await self.plugin._unload()
 
+    async def test_unload_during_startup_still_closes_the_audio_service(self):
+        gate = asyncio.Event()
+        async def slow_start(): await gate.wait()
+        service = Mock(start=AsyncMock(side_effect=slow_start), close=AsyncMock(), phase="off")
+        with patch.object(self.entry, "Store"), patch.object(self.entry, "Runtime", return_value=Mock(recover=AsyncMock())),                 patch.object(self.entry, "PresetFiles"), patch.object(self.entry, "Service", return_value=service):
+            main = asyncio.create_task(self.plugin._main())
+            await asyncio.sleep(0.01)
+            await self.plugin._unload()  # Arrives while _main is still starting the service.
+            gate.set()
+            await main
+        service.close.assert_awaited()
+
     async def test_checks_remain_available_after_audio_startup_failure(self):
         updater = self.entry.PluginUpdates.for_plugin(ROOT)
         service = Mock(start=AsyncMock(side_effect=RuntimeError("audio unavailable")), close=AsyncMock())

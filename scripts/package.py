@@ -8,11 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DECKY_API_VERSION = "1.1.3"  # Bundled under THIRD_PARTY_SOURCES; NOTICE names this version.
 REQUIRED = ["main.py", "plugin.json", "package.json", "package-lock.json", "rollup.config.js", "tsconfig.json",
-            "README.md", "DeckyEQ.png", "NOTICE", "LICENSE", "dist/index.js", "dist/index.js.map", "scripts/package.py"]
-SOURCE_DIRECTORIES = ("deckyeq", "src", "docs", "schemas", "presets")
-SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".md", ".json")
+            "README.md", "DeckyEQ.png", "NOTICE", "LICENSE", "dist/index.js", "dist/index.js.map", "scripts/package.py",
+            "scripts/build_native.py", "bin/deckyeq_dsp.so"]
+SOURCE_DIRECTORIES = ("deckyeq", "src", "docs", "schemas", "presets", "native")
+SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".md", ".json", ".c")
 RUNTIME_FILES = ("DeckyEQ/main.py", "DeckyEQ/deckyeq/runtime.py", "DeckyEQ/deckyeq/worker.py",
-                 "DeckyEQ/deckyeq/limits.json", "DeckyEQ/dist/index.js")
+                 "DeckyEQ/deckyeq/limits.json", "DeckyEQ/dist/index.js", "DeckyEQ/bin/deckyeq_dsp.so")
 PREVIEW_MARKERS = ("PreviewEngine", "UI preview", "alsa_output.preview", "preview-modal")
 FIXED_TIMESTAMP = (2026, 9, 7, 0, 0, 0)  # Same bytes for the same inputs.
 
@@ -51,6 +52,9 @@ def collect_files():
 
 
 def check_bundle():
+    stage = (ROOT / "bin/deckyeq_dsp.so").read_bytes()
+    if stage[:4] != b"\x7fELF" or stage[4] != 2 or stage[18:20] != b"\x3e\x00":
+        raise ValueError("bin/deckyeq_dsp.so is not an x86-64 Linux library; run scripts/build_native.py.")
     bundle = (ROOT / "dist/index.js").read_text(encoding="utf-8")
     if any(marker in bundle for marker in PREVIEW_MARKERS):
         raise ValueError("Development preview leaked into the production bundle.")

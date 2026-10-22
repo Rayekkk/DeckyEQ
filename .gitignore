@@ -7,3 +7,6 @@ __pycache__/
 coverage/
 preview-dist/
 .local/
+
+# Built native audio stage
+bin/

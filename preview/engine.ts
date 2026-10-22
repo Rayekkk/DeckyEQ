@@ -5,9 +5,9 @@ import goS from "../presets/legion-go-s-original.json";
 
 export function seed(): Snapshot {
   return { version: "1.0.0", revision: 0, state: { version: 2, enabled: false, target: "alsa_output.preview",
-    speakers_only: true, selected: "flat", working: flatEQ() },
+    speakers_only: true, boost: 0, selected: "flat", working: flatEQ() },
     presets: [{ id: "flat", name: "Flat", eq: flatEQ(), factory: true },
-      { id: "go-s-original", name: goS.preset.name, eq: goS.preset.eq as EQ, factory: true,
+      { id: "go-s-original", name: goS.preset.name, eq: { width: 1, limiter: true, ...goS.preset.eq } as EQ, factory: true,
         description: "Community speaker preset by GAZuOOT. Original +8 dB input boost; automatic headroom is off. Lower playback volume if it distorts." }], dirty: false,
     audio: { supported: true, phase: "off", message: "EQ is off. Your presets are kept.", error: null,
       outputs: [{ name: "alsa_output.preview", description: "Legion Go 2 speakers", port: "analog-output-speaker", speaker: true }],
@@ -23,7 +23,7 @@ export class PreviewEngine implements Transport {
     if (revision !== this.value.revision) return { ok: false, error: "Stale revision", state: await this.status() };
     const value = structuredClone(this.value), state = value.state;
     const selected = () => value.presets.find(p => p.id === state.selected)!;
-    if (action === "edit") state.working = cloneEQ(payload.eq);
+    if (action === "edit") { state.working = cloneEQ(payload.eq); if ("boost" in payload) state.boost = payload.boost; }
     if (action === "enable") state.enabled = payload.enabled;
     if (action === "output") { state.target = payload.target; state.speakers_only = payload.speakers_only; }
     if (action === "save_as") {
@@ -41,7 +41,7 @@ export class PreviewEngine implements Transport {
     value.audio.phase = state.enabled ? "active" : "off";
     value.audio.message = state.enabled ? "Live EQ · Legion Go 2 speakers" : "EQ is off. Your presets are kept.";
     const eq = state.working;
-    Object.assign(value.audio, headroom(eq));
+    Object.assign(value.audio, headroom(eq, state.boost));
     value.revision++;
     this.value = value;
     return { ok: true, state: await this.status(), ...(action === "export" ? { path: `${value.export_directory}/preview-preset.json` } : {}) };

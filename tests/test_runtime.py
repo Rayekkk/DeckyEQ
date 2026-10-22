@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import math
 import os
 import tempfile
 import time
@@ -9,8 +10,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from deckyeq.graph import SINK_NAME, PLAYBACK_NAME, controls
-from deckyeq.model import EQError, flat_eq
+from deckyeq.model import EQError, flat_eq as factory_flat_eq
 from deckyeq.runtime import Runtime, UNITY_VOLUME, environment, normalize_sinks, sink_level
+
+
+def flat_eq():
+    # Without the limiter, automatic headroom moves the input level with every boost; the level
+    # ordering and ramps below rely on that.
+    eq = factory_flat_eq()
+    eq["limiter"] = False
+    return eq
 
 
 class Process:
@@ -37,6 +46,7 @@ class AudioServer(Runtime):
         super().__init__(directory)
         self.supported, self.reason = True, None
         self.tools = {name: "/usr/bin/" + name for name in ("pipewire", "pw-cli", "pw-dump", "pactl", "python3")}
+        self.stage_library = Path(__file__)  # Any existing file: the fake never loads it.
         self.commands = []
         self.mock_default = "alsa_output.speaker"
         self.actual = controls(flat_eq())
@@ -55,6 +65,9 @@ class AudioServer(Runtime):
         self.virtual = {"name": SINK_NAME, "index": 3, "mute": False, "channel_map": ["front-left", "front-right"],
                         "volume": {"front-left": {"value": UNITY_VOLUME}, "front-right": {"value": UNITY_VOLUME}}}
         self.routes = {}
+        self.state = "running"
+        self.unlinked = False  # True: WirePlumber never inserts the filter (pre-0.5).
+        self.stale = None  # Props a suspended node keeps reporting.
 
     def set_port(self, name, port):
         """Like WirePlumber: remember the current route's volume and restore the new route's."""
@@ -68,10 +81,21 @@ class AudioServer(Runtime):
         self.commands.append((tool, *args))
         live = self.process is not None and self.process.returncode is None
         if tool == "pw-dump":
+            reported = self.stale if self.state == "suspended" else self.actual
             node = {"id": 70, "type": "PipeWire:Interface:Node", "info": {
+                "state": self.state,
                 "props": {"node.name": SINK_NAME, "deckyeq.owner": self.owner, "object.serial": 200},
-                "params": {"Props": [{"params": copy.deepcopy(self.actual)}]}}}
-            return json.dumps([node] if live and not self.drop_node else [])
+                "params": {"Props": [{"params": copy.deepcopy(reported)}]}}}
+            if not live or self.drop_node:
+                return json.dumps([])
+            if args:  # pw-dump <id>: just that object
+                return json.dumps([node] if args[0] == "70" else [])
+            # WirePlumber links a smart filter's output to its target (unless it is too old to).
+            playback = {"id": 71, "type": "PipeWire:Interface:Node",
+                        "info": {"props": {"node.name": PLAYBACK_NAME, "deckyeq.owner": self.owner}}}
+            target = {"id": 72, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": self.target}}}
+            link = {"id": 73, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 71, "input-node-id": 72}}
+            return json.dumps([node, playback, target] + ([] if self.unlinked else [link]))
         if tool == "pw-cli":
             if not self.reject_controls:
                 values = json.loads(args[3])["params"]
@@ -118,12 +142,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def start(self):
         await self.runtime.start(flat_eq(), "alsa_output.speaker")
 
-    async def test_starts_private_process_and_routes_existing_streams(self):
+    def writes(self):
+        """Commands that would change the audio session outside DeckyEQ's own filter."""
+        return [c for c in self.runtime.commands if c[0] == "pactl" and c[1] in
+                ("set-default-sink", "set-sink-volume", "set-sink-mute", "move-sink-input")]
+
+    async def test_starts_a_smart_filter_without_touching_the_audio_session(self):
+        before = (self.runtime.mock_default, copy.deepcopy(self.runtime.sinks), copy.deepcopy(self.runtime.streams))
         await self.start()
         self.assertTrue(self.runtime.running)
-        self.assertEqual(self.runtime.mock_default, SINK_NAME)
-        self.assertEqual(self.runtime.streams[0]["sink"], 3)
-        self.assertTrue(self.runtime.journal.exists())
+        self.assertEqual(self.writes(), [])
+        self.assertEqual((self.runtime.mock_default, self.runtime.sinks, self.runtime.streams), before)
         args, kwargs = self.mock_spawn.call_args
         self.assertEqual(args[:2], ("/usr/bin/python3", "-I"))
         self.assertTrue(args[2].endswith("worker.py"))
@@ -131,6 +160,29 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["env"]["PIPEWIRE_CONFIG_DIR"], str(self.runtime.directory))
         self.assertTrue(kwargs["start_new_session"])
         self.assertNotIn("shell", kwargs)
+        capture = json.loads(self.runtime.config.read_text())["context.modules"][-1]["args"]["capture.props"]
+        self.assertTrue(capture["filter.smart"])
+        self.assertEqual(capture["filter.smart.target"], {"node.name": "alsa_output.speaker"})
+
+    async def test_stop_only_ends_the_filter(self):
+        await self.start()
+        process = self.runtime.process
+        await self.runtime.stop()
+        self.assertIsNotNone(process.returncode)
+        self.assertFalse(self.runtime.running)
+        self.assertEqual(self.writes(), [])
+        self.assertFalse(self.runtime.journal.exists())
+
+    async def test_failed_start_leaves_no_filter_running(self):
+        self.runtime.drop_node = True
+        with patch("deckyeq.runtime.START_SECONDS", 0.3):
+            with self.assertRaises(EQError): await self.start()
+        self.assertIsNone(self.runtime.process)
+        self.assertEqual(self.writes(), [])
+
+    async def test_disconnected_output_is_refused(self):
+        with self.assertRaises(EQError): await self.runtime.start(flat_eq(), "alsa_output.gone")
+        self.assertIsNone(self.runtime.process)
 
     async def test_live_controls_update_without_restarting_graph(self):
         await self.start()
@@ -138,12 +190,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         eq = flat_eq()
         eq["bass"] = 6
         await self.runtime.apply(eq)
-        self.assertEqual(self.runtime.actual["bass:Gain"], 6)
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 6)
         self.assertIs(self.runtime.process, process)
         self.mock_spawn.assert_called_once()
         commands = [c for c in self.runtime.commands if c[0] == "pw-cli"]
         first = json.loads(commands[0][4])["params"]
-        self.assertEqual(first[0], "level:Mult")
+        self.assertEqual(first[0], "level_l:Mult")
         self.assertLess(first[1], 1)
         self.assertEqual(json.loads(commands[-1][4])["params"],
                          [item for pair in controls(eq).items() for item in pair])
@@ -153,7 +205,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.reject_controls = True
         eq = flat_eq(); eq["treble"] = 2
         with self.assertRaisesRegex(EQError, "confirm"): await self.runtime.apply(eq)
-        self.assertEqual(self.runtime.last_controls["treble:Gain"], 0)
+        self.assertIsNone(self.runtime.last_controls)  # Unknown now: the next apply reads back.
 
     async def test_type_changes_disable_previous_filter_without_restart(self):
         await self.start()
@@ -163,7 +215,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             eq["bands"][0].update(type=kind, gain=4, q=2)
             await self.runtime.apply(eq)
             for variant in ("", "_low", "_high"):
-                self.assertEqual(self.runtime.actual[f"band0{variant}:Gain"], 4 if variant == suffix else 0)
+                self.assertEqual(self.runtime.actual[f"band0{variant}_l:Gain"], 4 if variant == suffix else 0)
             self.assertIs(self.runtime.process, process)
         self.mock_spawn.assert_called_once()
 
@@ -171,17 +223,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         boosted = flat_eq(); boosted["bass"] = 6
         await self.runtime.apply(boosted)
-        protected_level = self.runtime.actual["level:Mult"]
-        self.runtime.reject_keys.add("bass:Gain")
+        protected_level = self.runtime.actual["level_l:Mult"]
+        self.runtime.reject_keys.add("bass_l:Gain")
         self.runtime.commands.clear()
         with self.assertRaisesRegex(EQError, "confirm"):
             await self.runtime.apply(flat_eq())
-        self.assertEqual(self.runtime.actual["bass:Gain"], 6)
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 6)
         for command in self.runtime.commands:
             if command[0] == "pw-cli":
                 params = json.loads(command[4])["params"]
                 values = dict(zip(params[::2], params[1::2]))
-                self.assertLessEqual(values.get("level:Mult", protected_level), protected_level)
+                self.assertLessEqual(values.get("level_l:Mult", protected_level), protected_level)
 
     async def test_lost_node_not_hidden_by_cached_settings(self):
         await self.start()
@@ -197,27 +249,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         eq = flat_eq()
         eq["bass"] = 2
         await self.runtime.apply(eq, max_age=15)
-        self.assertEqual(self.runtime.actual["bass:Gain"], 2)
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 2)
         self.runtime.commands.clear()
         self.runtime.sink_present = False
         await self.runtime.apply(eq, max_age=15)
-        self.assertIn(("pw-dump",), self.runtime.commands)
+        self.assertIn("pw-dump", [c[0] for c in self.runtime.commands])
         self.runtime.commands.clear()
         self.runtime.sink_present = True
         self.runtime.verified_at -= 16
         await self.runtime.apply(eq, max_age=15)
-        self.assertIn(("pw-dump",), self.runtime.commands)
-
-    async def test_interrupted_stop_keeps_journal_until_volume_is_restored(self):
-        for interruption in (AttributeError("odd pactl data"), asyncio.CancelledError()):
-            await self.start()
-            self.assertEqual(self.runtime.sinks[0]["volume"]["front-left"]["value"], UNITY_VOLUME)
-            with patch.object(self.runtime, "_restore_level", side_effect=interruption):
-                with self.assertRaises(type(interruption)): await self.runtime.stop()
-            self.assertTrue(self.runtime.journal.exists())
-            await self.runtime.recover()
-            self.assertFalse(self.runtime.journal.exists())
-            self.assertEqual(self.runtime.sinks[0]["volume"]["front-left"]["value"], 45864)
+        self.assertIn("pw-dump", [c[0] for c in self.runtime.commands])
 
     def test_malformed_sink_properties_are_ignored(self):
         outputs = normalize_sinks([{"name": "alsa_output.speaker", "properties": ["bad"], "active_port": "speaker"}])
@@ -230,55 +271,39 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for entry in sink["volume"].values():
             entry["value"] = value
 
-    async def test_port_change_keeps_user_volume_until_the_speaker_returns(self):
-        speaker = self.runtime.sinks[0]
-        self.runtime.routes[("alsa_output.speaker", "headphones")] = {
-            "front-left": {"value": 30000}, "front-right": {"value": 30000}}
-        await self.start()
-        self.set_volume(self.runtime.virtual, 20000)  # The user turns the EQ volume down.
-        await self.runtime.scan()
-        self.runtime.set_port("alsa_output.speaker", "headphones")
-        await self.runtime.stop()  # Speaker-only bypass.
-        self.assertEqual(self.volume(speaker), [30000, 30000])
-        self.assertTrue(self.runtime.journal.exists())
-        self.runtime.set_port("alsa_output.speaker", "analog-output-speaker")
-        self.assertEqual(self.volume(speaker), [UNITY_VOLUME] * 2)  # The route we held at 100%.
-        await self.start()
-        self.assertEqual(self.volume(self.runtime.virtual), [20000, 20000])
-        await self.runtime.stop()
-        self.assertEqual(self.volume(speaker), [20000, 20000])
-        self.assertFalse(self.runtime.journal.exists())
-
-    async def test_disconnected_device_neither_blocks_eq_nor_loses_its_volume(self):
-        await self.runtime.start(flat_eq(), "bluez_output.headset")
-        headset = self.runtime.sinks.pop(1)
-        await self.runtime.stop()
-        self.assertTrue(self.runtime.journal.exists())
-        await self.start()
-        await self.runtime.stop()
-        self.assertTrue(self.runtime.journal.exists())
-        headset["properties"] = {"object.serial": 999}  # Reconnected as a new node.
-        self.set_volume(headset, UNITY_VOLUME)
-        self.runtime.sinks.append(headset)
-        await self.runtime.recover()
-        self.assertEqual(self.volume(headset), [45864, 45864])
-        self.assertFalse(self.runtime.journal.exists())
-
-    async def test_failed_restore_mutes_hardware_before_stopping_the_filter(self):
-        await self.start()
-        with patch.object(self.runtime, "_restore_level", side_effect=EQError("pactl timed out")):
-            with self.assertRaises(EQError): await self.runtime.stop()
-        self.assertTrue(self.runtime.sinks[0]["mute"])
-        await self.runtime.recover()
-        self.assertFalse(self.runtime.sinks[0]["mute"])
-        self.assertEqual(self.volume(self.runtime.sinks[0]), [45864, 45864])
-
-    async def test_unreadable_journal_is_set_aside_instead_of_blocking_eq(self):
+    async def test_unreadable_legacy_journal_is_set_aside_instead_of_blocking_eq(self):
         self.runtime.journal.write_text('{"version": 3, "previous": []}', encoding="utf-8")
         with self.assertRaises(EQError): await self.runtime.recover()
         self.assertFalse(self.runtime.journal.exists())
         self.assertTrue(self.runtime.journal.with_name("routing.invalid.json").exists())
         await self.start()
+
+    async def test_legacy_journal_for_an_absent_device_waits_for_it(self):
+        headset = self.runtime.sinks.pop(1)
+        level = {"values": [20000, 20000], "mute": False}
+        self.runtime.journal.write_text(json.dumps({"version": 3, "pending": [
+            {"target": "bluez_output.headset", "port": "", "force": False, "level": level}]}), encoding="utf-8")
+        await self.start()  # Never blocked by a restore owed to another device.
+        await self.runtime.stop()
+        self.assertTrue(self.runtime.journal.exists())
+        self.set_volume(headset, UNITY_VOLUME)
+        self.runtime.sinks.append(headset)
+        await self.runtime.recover()
+        self.assertEqual(self.volume(headset), [20000, 20000])
+        self.assertFalse(self.runtime.journal.exists())
+
+    async def test_legacy_restore_the_device_does_not_confirm_is_dropped_not_retried(self):
+        speaker = self.runtime.sinks[0]
+        self.set_volume(speaker, UNITY_VOLUME)
+        level = {"values": [20000, 20000], "mute": False}
+        self.runtime.journal.write_text(json.dumps({"version": 3, "pending": [
+            {"target": "alsa_output.speaker", "port": "", "force": True, "level": level}]}), encoding="utf-8")
+        with patch.object(self.runtime, "_set_level", side_effect=EQError("did not confirm")) as set_level:
+            await self.runtime.recover()
+            await self.runtime.recover()
+        self.assertEqual(set_level.call_count, 1)  # Tried once, then dropped.
+        self.assertFalse(self.runtime.journal.exists())
+        await self.start()  # Never blocked by it.
 
     async def test_version_2_journal_is_still_restored(self):
         speaker = self.runtime.sinks[0]
@@ -305,8 +330,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         eq = flat_eq()
         eq["bass"] = 2
         await self.runtime.apply(eq)
-        self.assertEqual(sum(command[0] == "pw-dump" for command in self.runtime.commands), 2)
-        self.assertEqual(self.runtime.actual["bass:Gain"], 2)
+        # One readback of just our node; the level only falls here, so no rise ramp:
+        # one level write plus the interpolation steps for a 2 dB change.
+        self.assertEqual([c for c in self.runtime.commands if c[0] == "pw-dump"], [("pw-dump", "70")])
+        self.assertEqual(sum(c[0] == "pw-cli" for c in self.runtime.commands), 3)
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 2)
         self.runtime.reject_controls = True
         eq["bass"] = 4
         with self.assertRaises(EQError): await self.runtime.apply(eq)
@@ -328,78 +356,117 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await self.runtime.wait_for_change(5))
         self.assertIsNone(self.runtime.subscriber)
 
+    async def test_suspended_filter_takes_writes_and_is_verified_once_audio_flows(self):
+        await self.start()
+        await self.runtime.scan()
+        self.runtime.state, self.runtime.stale = "suspended", copy.deepcopy(self.runtime.actual)
+        eq = flat_eq()
+        eq["bass"] = 6
+        await self.runtime.apply(eq)  # Stale readback while suspended is not an error.
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 6)
+        self.assertEqual(self.runtime.verified_at, -math.inf)
+        self.runtime.commands.clear()
+        await self.runtime.apply(eq, max_age=15)  # Already written: no second write while suspended.
+        self.assertNotIn("pw-cli", [command[0] for command in self.runtime.commands])
+        self.runtime.state = "running"
+        await self.runtime.apply(eq, max_age=15)
+        self.assertGreater(self.runtime.verified_at, 0.0)
+
+    async def test_rollback_after_a_failed_write_really_restores_the_sound(self):
+        await self.start()
+        await self.runtime.scan()
+        eq = flat_eq()
+        eq["bass"] = 6
+        self.runtime.reject_controls = True
+        with self.assertRaises(EQError): await self.runtime.apply(eq)
+        self.runtime.reject_controls = False
+        self.runtime.actual["bass_l:Gain"] = 3.6  # Half-written before the failure.
+        await self.runtime.apply(flat_eq())  # The rollback must not trust the old cache.
+        self.assertEqual(self.runtime.actual["bass_l:Gain"], 0)
+
+    async def test_unverified_state_is_not_fresh_right_after_boot(self):
+        await self.start()
+        await self.runtime.scan()
+        self.runtime.state, self.runtime.stale = "suspended", copy.deepcopy(self.runtime.actual)
+        eq = flat_eq()
+        eq["bass"] = 6
+        await self.runtime.apply(eq)
+        self.runtime.state = "running"
+        self.runtime.commands.clear()
+        with patch("deckyeq.runtime.time.monotonic", return_value=5.0):  # 5 s after boot
+            await self.runtime.apply(eq, max_age=15)
+        self.assertIn("pw-dump", [c[0] for c in self.runtime.commands])
+
+    async def test_level_rise_is_ramped_after_the_filters_are_confirmed(self):
+        await self.start()
+        await self.runtime.scan()
+        boosted = flat_eq()
+        boosted["bass"] = 9  # Auto headroom lowers the level by ~9.5 dB.
+        await self.runtime.apply(boosted)
+        self.runtime.commands.clear()
+        await self.runtime.apply(flat_eq())  # Level back up by ~9.5 dB.
+        levels = [json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli"]
+        level_only = [p for p in levels if p[::2] == ["level_l:Mult", "level_r:Mult"]]
+        self.assertTrue(all(p[1] == p[3] for p in level_only))  # Both channels move together.
+        self.assertGreater(len(level_only), 1)
+        self.assertEqual(level_only, sorted(level_only, key=lambda p: p[1]))
+        self.assertEqual(self.runtime.actual["level_l:Mult"], 1)
+
+    async def test_unequal_channel_levels_are_lowered_together_first(self):
+        await self.start()
+        await self.runtime.scan()
+        self.runtime.actual["level_r:Mult"] = 0.5  # E.g. a write interrupted between the channels.
+        self.runtime.last_controls = None
+        self.runtime.commands.clear()
+        eq = flat_eq()
+        eq["treble"] = 1
+        await self.runtime.apply(eq)
+        writes = [json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli"]
+        self.assertEqual(writes[0], ["level_l:Mult", 0.5, "level_r:Mult", 0.5])
+        expected = controls(eq)
+        self.assertEqual(self.runtime.actual["level_l:Mult"], self.runtime.actual["level_r:Mult"])
+        self.assertAlmostEqual(self.runtime.actual["level_l:Mult"], expected["level_l:Mult"])
+
+    async def test_the_limiter_leads_a_boost_up_and_trails_it_down(self):
+        await self.start()  # These tests run with the preset limiter off.
+        await self.runtime.scan()
+        boosted = flat_eq()
+        boosted["bass"] = 6  # Large enough for several interpolation steps.
+        for boost, expected_limit in ((6.0, 1.0), (0.0, 0.0)):
+            self.runtime.commands.clear()
+            await self.runtime.apply(boosted if boost else flat_eq(), boost=boost)
+            writes = [dict(zip(p[::2], p[1::2])) for p in
+                      (json.loads(c[4])["params"] for c in self.runtime.commands if c[0] == "pw-cli")]
+            stepped = [w for w in writes if "stage:limit" in w]
+            self.assertGreater(len(stepped), 2)
+            self.assertTrue(all(w["stage:limit"] == 1.0 for w in stepped[:-1]))  # On while anything moves.
+            self.assertEqual(stepped[-1]["stage:limit"], expected_limit)
+            self.assertEqual(self.runtime.actual["stage:gain"], boost)
+
+    async def test_start_refuses_without_the_audio_stage(self):
+        self.runtime.stage_library = Path(self.runtime.directory) / "missing.so"
+        with self.assertRaisesRegex(EQError, "audio stage"):
+            await self.runtime.start(flat_eq(), "alsa_output.speaker")
+        self.mock_spawn.assert_not_called()
+
+    async def test_a_just_stopped_filter_still_listed_does_not_block_start(self):
+        self.runtime.foreign = True
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.3, setattr, self.runtime, "foreign", False)
+        await self.start()
+        self.assertTrue(self.runtime.running)
+
+    async def test_start_explains_when_wireplumber_does_not_insert_the_filter(self):
+        self.runtime.unlinked = True
+        with patch("deckyeq.runtime.START_SECONDS", 0.3):
+            with self.assertRaisesRegex(EQError, "WirePlumber 0.5"): await self.start()
+        self.assertIsNone(self.runtime.process)
+
     async def test_external_control_drift_repaired(self):
         await self.start()
-        self.runtime.actual["band3:Gain"] = 3
+        self.runtime.actual["band3_l:Gain"] = 3
         await self.runtime.apply(flat_eq())
-        self.assertEqual(self.runtime.actual["band3:Gain"], 0)
-
-    async def test_stop_restores_original_and_new_streams(self):
-        await self.start()
-        self.runtime.streams.append({"index": 11, "sink": 3, "properties": {"object.serial": 101}})
-        await self.runtime.stop()
-        self.assertEqual(self.runtime.mock_default, "alsa_output.speaker")
-        self.assertEqual([s["sink"] for s in self.runtime.streams], [1, 1])
-        self.assertFalse(self.runtime.journal.exists())
-        self.assertEqual(sink_level(self.runtime.sinks[0]), {"values": [45864, 45864], "mute": False})
-
-    async def test_manual_default_change_survives_stop(self):
-        await self.start()
-        self.runtime.mock_default = "bluez_output.headset"
-        await self.runtime.stop()
-        self.assertEqual(self.runtime.mock_default, "bluez_output.headset")
-        self.assertEqual(self.runtime.streams[0]["sink"], 2)
-
-    async def test_failed_activation_stops_child_and_restores_default(self):
-        self.runtime.fail_default = True
-        with self.assertRaises(EQError): await self.start()
-        self.assertIsNone(self.runtime.process)
-        self.assertEqual(self.runtime.mock_default, "alsa_output.speaker")
-        self.assertFalse(self.runtime.journal.exists())
-        self.assertEqual(sink_level(self.runtime.sinks[0]), {"values": [45864, 45864], "mute": False})
-
-    async def test_full_hardware_volume_is_verified_before_switching_output(self):
-        await self.start()
-        self.assertEqual(sink_level(self.runtime.sinks[0])["values"], [UNITY_VOLUME, UNITY_VOLUME])
-        self.assertEqual(sink_level(self.runtime.virtual)["values"], [45864, 45864])
-        commands = self.runtime.commands
-        gain_index = commands.index(("pactl", "set-sink-volume", "alsa_output.speaker", "65536", "65536"))
-        switch_index = commands.index(("pactl", "set-default-sink", SINK_NAME))
-        self.assertLess(gain_index, switch_index)
-        self.assertIn(("pactl", "--format=json", "list", "sinks"), commands[gain_index:switch_index])
-
-    async def test_current_eq_volume_and_mute_return_to_hardware_on_disable(self):
-        await self.start()
-        self.runtime.virtual["volume"]["front-left"]["value"] = 20000
-        self.runtime.virtual["volume"]["front-right"]["value"] = 25000
-        self.runtime.virtual["mute"] = True
-        await self.runtime.stop()
-        self.assertEqual(sink_level(self.runtime.sinks[0]), {"values": [20000, 25000], "mute": True})
-
-    async def test_partial_hardware_volume_failure_restores_before_activation(self):
-        self.runtime.fail_hardware_volume_once = True
-        with self.assertRaises(EQError): await self.start()
-        self.assertEqual(sink_level(self.runtime.sinks[0]), {"values": [45864, 45864], "mute": False})
-        self.assertNotIn(("pactl", "set-default-sink", SINK_NAME), self.runtime.commands)
-        self.assertIsNone(self.runtime.process)
-
-    async def test_crash_recovery_uses_last_observed_eq_volume(self):
-        await self.start()
-        for v in self.runtime.virtual["volume"].values(): v["value"] = 22000
-        await self.runtime.scan()
-        self.runtime.process.terminate()
-        self.runtime.process = self.runtime.node = None
-        self.runtime.volume = None
-        self.runtime.volume_committed = False
-        await self.runtime.recover()
-        self.assertEqual(sink_level(self.runtime.sinks[0])["values"], [22000, 22000])
-        self.assertFalse(self.runtime.journal.exists())
-
-    async def test_external_hardware_volume_change_is_preserved(self):
-        await self.start()
-        for v in self.runtime.sinks[0]["volume"].values(): v["value"] = 12000
-        await self.runtime.stop()
-        self.assertEqual(sink_level(self.runtime.sinks[0])["values"], [12000, 12000])
+        self.assertEqual(self.runtime.actual["band3_l:Gain"], 0)
 
     async def test_foreign_equalizer_is_never_reused_or_killed(self):
         self.runtime.foreign = True
@@ -421,6 +488,10 @@ class OutputTests(unittest.TestCase):
             clean = environment()
             self.assertEqual(clean["LD_LIBRARY_PATH"], "/system-libraries")
             self.assertNotIn("LD_LIBRARY_PATH_ORIG", clean)
+
+    def test_deckyeq_outputs_are_never_offered_as_targets(self):
+        sinks = [{"name": name, "active_port": "speaker"} for name in (SINK_NAME, "deckyeq.sink", "alsa_output.x")]
+        self.assertEqual([o["name"] for o in normalize_sinks(sinks)], ["alsa_output.x"])
 
     def test_speaker_detection_is_based_on_active_port(self):
         outputs = normalize_sinks([

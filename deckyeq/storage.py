@@ -8,7 +8,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from .model import EQError, MAX_IMPORT_BYTES, initial_state, validate_state
+from .model import EQError, MAX_IMPORT_BYTES, initial_state, portable_state, validate_state
 
 
 def safe_directory(path: Path):
@@ -34,6 +34,12 @@ def atomic_json(path: Path, value):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
+        if hasattr(os, "O_DIRECTORY"):  # Make the rename itself durable (POSIX).
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
@@ -83,8 +89,8 @@ class Store:
             except (OSError, ValueError, UnicodeError, RecursionError):
                 old = None
             if old is not None:
-                atomic_json(self.backup, old)
-        atomic_json(self.path, state)
+                atomic_json(self.backup, portable_state(old))
+        atomic_json(self.path, portable_state(state))
 
 
 class PresetFiles:
@@ -120,7 +126,7 @@ class PresetFiles:
                 raise EQError("Choose a regular preset file.")
             raw = handle.read(MAX_IMPORT_BYTES + 1)
         if len(raw) > MAX_IMPORT_BYTES:
-            raise EQError("Preset files must be no larger than 256 KiB.")
+            raise EQError(f"Preset files must be no larger than {MAX_IMPORT_BYTES // 1024} KiB.")
         try:
             return raw.decode("utf-8-sig")
         except UnicodeError:

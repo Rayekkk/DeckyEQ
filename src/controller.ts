@@ -10,6 +10,7 @@ export class Controller {
   private view: View = { snapshot: null, error: null, note: null, busy: false, saving: false, connected: false };
   private listeners = new Set<() => void>();
   private desired: EQ | null = null;
+  private desiredBoost: number | null = null;  // Travels with the next slider write.
   private timer: ReturnType<typeof setTimeout> | null = null;
   private drain: Promise<void> | null = null;
   private reading: Promise<void> | null = null;
@@ -50,21 +51,22 @@ export class Controller {
     try { await request; } finally { if (this.reading === request) this.reading = null; }
   };
 
-  edit = (eq: EQ) => {
+  edit = (eq: EQ, boost?: number) => {
     if (!this.view.snapshot || !this.view.connected || this.view.busy || this.disposed) return;
     this.epoch++;
     this.desired = cloneEQ(eq);
-    const snapshot = this.optimistic(this.view.snapshot, eq);
+    if (boost !== undefined) this.desiredBoost = boost;
+    const snapshot = this.optimistic(this.view.snapshot, eq, this.desiredBoost);
     this.publish({ snapshot, saving: true, error: null, note: null });
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, EDIT_DEBOUNCE_MS);
   };
 
-  private optimistic(snapshot: Snapshot, eq: EQ): Snapshot {
+  private optimistic(snapshot: Snapshot, eq: EQ, boost: number | null = null): Snapshot {
     const preset = snapshot.presets.find(p => p.id === snapshot.state.selected);
-    return { ...snapshot, state: { ...snapshot.state, working: cloneEQ(eq) },
+    return { ...snapshot, state: { ...snapshot.state, working: cloneEQ(eq), ...(boost === null ? {} : { boost }) },
       dirty: !sameEQ(eq, preset?.eq),
-      audio: { ...snapshot.audio, ...headroom(eq) } };
+      audio: { ...snapshot.audio, ...headroom(eq, boost ?? snapshot.state.boost) } };
   }
 
   flush = async (): Promise<void> => {
@@ -78,18 +80,20 @@ export class Controller {
 
   private async writePending() {
     while (this.desired && this.view.snapshot && !this.disposed) {
-      const eq = this.desired;
-      this.desired = null;
+      const eq = this.desired, boost = this.desiredBoost;
+      this.desired = this.desiredBoost = null;
       try {
-        const result = await this.transport.perform("edit", { eq }, this.view.snapshot.revision);
+        const result = await this.transport.perform("edit", boost === null ? { eq } : { eq, boost },
+          this.view.snapshot.revision);
         if (!result.ok || !result.state) {
-          this.desired = null;
+          this.desired = this.desiredBoost = null;
           this.publish({ snapshot: result.state || this.view.snapshot, error: result.error || "EQ was not applied.", saving: false });
           return;
         }
-        this.publish({ snapshot: this.desired ? this.optimistic(result.state, this.desired) : result.state, connected: true });
+        this.publish({ snapshot: this.desired ? this.optimistic(result.state, this.desired, this.desiredBoost) : result.state,
+          connected: true });
       } catch (error) {
-        this.desired = null;
+        this.desired = this.desiredBoost = null;
         this.unconfirmed = true;
         this.publish({ error: `Change not confirmed. ${text(error)}`, connected: false, saving: false });
         return;
@@ -126,7 +130,7 @@ export class Controller {
     this.epoch++;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.desired = null;
+    this.desired = this.desiredBoost = null;
     this.listeners.clear();
   }
 }

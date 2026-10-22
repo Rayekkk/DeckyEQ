@@ -32,13 +32,16 @@ class Plugin:
             runtime_dir = Path(getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", None) or str(settings / "runtime"))
             runtime = Runtime(runtime_dir)
             try:
-                # Restore a volume left at 100% by a crash even if the settings cannot be loaded.
+                # Settle a DeckyEQ 1.0 crash journal even if the settings cannot be loaded.
                 await runtime.recover()
             except Exception:
                 decky.logger.exception("DeckyEQ audio recovery failed")
             files = PresetFiles(environment().get("HOME") or str(Path.home()))
             self._service = Service(Store(settings), runtime, files)
             await self._service.start()
+            if getattr(self, "_unloading", False):
+                await self._service.close()  # Decky unloaded us while we were starting.
+                return
             decky.logger.info("DeckyEQ %s loaded pid=%s uid=%s audio=%s", VERSION, os.getpid(),
                               getattr(os, "getuid", lambda: -1)(), self._service.phase)
         except Exception as exc:
@@ -51,7 +54,10 @@ class Plugin:
         # Decky can receive a frontend RPC before scheduling _main.
         for _ in range(100):
             if hasattr(self, "_ready"):
-                await asyncio.wait_for(self._ready.wait(), 15)
+                try:
+                    await asyncio.wait_for(self._ready.wait(), 30)
+                except asyncio.TimeoutError:
+                    raise RuntimeError("DeckyEQ is still starting. Try again.") from None
                 if self._startup_error:
                     raise RuntimeError(self._startup_error)
                 return self._service
@@ -80,6 +86,7 @@ class Plugin:
         return await asyncio.to_thread(updates.download, expected_version)
 
     async def _unload(self):
+        self._unloading = True
         updates = getattr(self, "_updates", None)
         if updates:
             updates.close()

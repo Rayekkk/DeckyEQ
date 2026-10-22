@@ -8,14 +8,22 @@
    option in its developer settings.
 2. Open **DeckyEQ** in the quick-access menu. Enable **Enable EQ**. The first
    activation selects the current speaker output if possible. If no suitable
-   speaker output is found, choose an output under **Output**.
-3. Play familiar audio and adjust **Bass**, **Treble** and the ten band sliders.
-4. Open **Presets**, enter a name and choose **Save as new preset**.
+   speaker output is found, choose an output under **Output and level**.
+3. Play familiar audio and adjust **Bass**, **Treble** and, under **Equalizer
+   bands**, the ten band sliders.
+4. Open **Presets**, choose **Save as new…** and enter a name.
 
-Use the **View** dropdown to switch between Equalizer, Presets, Output and About.
-Actions occupy separate full-width rows for the narrow quick-access menu.
-The plugin keeps the view mounted while Steam opens native dropdown menus,
-so View and advanced-band selections survive the temporary QAM hide.
+The main screen holds **Enable EQ**, **Preset**, **Bass** and **Treble**. Below
+them, rows with a one-line summary open **Equalizer bands**, **Presets**,
+**Output and level** and **About**; each page starts with a back button that
+takes the D-pad focus, **B** goes back one page, and going back returns focus to
+the row you came from.
+Technical facts and rare actions are under **Show details**. Outcomes such as
+an export path appear as a Steam toast; errors stay on the page that caused them,
+and a failure of an action confirmed in a dialog (which hides the menu) is also
+toasted. A refused preset name reopens the dialog with the typed name and reason.
+The plugin keeps the panel mounted while Steam opens native dropdown menus,
+so the open page and band selections survive the temporary QAM hide.
 
 The plugin uses the system's `pipewire`, `pw-cli`, `pw-dump`, `pactl` and `python3`.
 It does not download audio packages, require root, install LSP/EasyEffects,
@@ -25,33 +33,35 @@ remains available while audio is off.
 
 The plugin must run without Decky's `root` flag, in the desktop user's session.
 It starts its own PipeWire **client** process, not a replacement audio server.
-Enabling EQ redirects default playback and existing streams on the selected or
-previous default output through the virtual `DeckyEQ` sink. Playback explicitly
-pinned to unrelated devices is left alone. Individual stream volumes are kept.
+The equalizer is a WirePlumber (0.5+) **smart filter** in front of the selected
+output: WirePlumber links every stream aimed at that output, directly or as the
+default, through the filter first. DeckyEQ never changes the default output, never
+moves streams and never changes a volume. Steam's volume slider, the volume buttons
+and Steam's output choice behave exactly as without EQ; a stream that Steam sends to
+another output does not pass the filter, and the panel shows **Standby**. The
+filter's own `DeckyEQ` sink is never chosen as the default output by WirePlumber.
 
-Before switching the default output, DeckyEQ copies the hardware volume and
-mute state to its virtual sink, then sets and verifies the physical output at
-**100%**. The physical output is briefly muted while streams are moved, then
-unmuted. This removes the double volume control that would otherwise limit the
-EQ sink's maximum volume to the hardware's old setting. Adjust playback volume
-normally through Steam while EQ is active.
+If the filter process ends, including when the Decky backend is killed (a Linux
+parent-death signal stops it), WirePlumber links playback straight to the output at
+the user's volume. Nothing has to be restored.
 
-Disabling EQ transfers its current volume and mute state back before returning
-playback to the hardware. Failed activation restores the original values.
-A separate hardware-volume change made while EQ is running is respected.
-The recovery journal tracks the latest observed EQ volume (normally every
-1.5 seconds); after a crash, restoration can lag the very last slider movement.
+DeckyEQ 1.0 instead held the hardware at 100% behind a virtual output and kept a
+recovery journal. A journal left by a 1.0 crash is still settled at startup and
+when an output appears: owed volumes are restored when their device and port are
+present, a restore the device does not confirm is dropped instead of retried, it
+never blocks EQ, and an unreadable journal is
+set aside instead of blocking EQ.
 
 ## Presets and drafts
 
 Slider edits are applied immediately and automatically stored as the current
-draft. **Update selected preset** commits the draft to that library entry.
-**Save as new preset** creates an independent copy. Switching away from an edited
-draft asks before replacing it; **Revert to saved preset** restores the original.
+draft. **Save changes** commits the draft to that library entry.
+**Save as new…** creates an independent copy. Switching away from an edited
+draft asks before replacing it; **Discard changes** restores the original.
 Built-in presets cannot be overwritten, renamed or deleted. Their settings can
 be edited live and saved as a new user preset.
 
-**Legion Go S · Original** is available directly in **Current preset**. It
+**Legion Go S · Original** is available directly in **Preset**. It
 reproduces the native filters actually parsed from GAZuOOT's community file,
 including its +8 dB input boost and unusual frequency values. Automatic headroom
 is off for this preset. It may distort at high playback levels; reduce **Input
@@ -59,11 +69,11 @@ level** or enable automatic headroom to make your own adjusted version.
 See [the exact settings and source notes](GO_S_PRESET.md). This is a Go S
 community tuning preset, not a measured calibration for Go 2.
 
-**Export current sound** includes the current draft, even if it has not been
-saved to a named preset. **Export saved preset library** includes the saved user
+**Export this sound** includes the current draft, even if it has not been
+saved to a named preset. **Export all presets** includes the saved user
 presets, not the draft. An empty library exports Flat. Default exports go to
 `~/Documents/DeckyEQ/`; a second export with the same name gets a numeric suffix
-and never overwrites an existing file. You can also choose an export folder.
+and never overwrites an existing file. **Show details** offers another export folder.
 
 Import uses Decky's file picker. Place imported files in your home directory,
 for example Downloads. Only bounded UTF-8 `.json` files inside the user's home
@@ -80,35 +90,73 @@ The engine applies
 stricter runtime validation as well. Device names, process identifiers, filesystem
 paths and runtime preferences are deliberately excluded from shared presets.
 
-## Headroom and tone controls
+## Headroom, limiter and tone controls
 
 The two tone sliders are additional shelves; their effects add to the ten bands.
 The chart shows **individual band gains**, not a measured speaker response.
 
-Automatic headroom sums the maximum gain of each filter, including resonance
-from adjustable-Q shelves, and adds any positive input gain plus 0.5 dB margin.
-For example, +3 dB bass and +2 dB on one bell gives -5.5 dB compensation. This
-conservative bound also covers overlapping filters; even a shelf cut can have
-a resonant peak at high Q. The **Input level** adjustment is added to the
-compensation. Consequently the sound can
-become quieter when boosting several bands. It is not a limiter, a loudness
-normalizer or a guarantee against physical speaker distortion.
+After the filters, both channels pass DeckyEQ's own stereo stage, a small LADSPA
+plugin shipped as `bin/deckyeq_dsp.so` (source: `native/deckyeq_dsp.c`). It first
+applies **Stereo width** (mid/side: 0% is mono, 100% unchanged, 200% twice the side
+signal; changes glide over about 10 ms), then **Volume boost** (0 to +12 dB, gliding
+the same way), then the **Limiter**: a stereo-linked
+look-ahead peak limiter with a 1.5 ms delay, a ceiling at full scale (0 dBFS) and
+100 ms release, so unboosted audio is never touched. Very large boosts limited this
+way can sound compressed; automatic headroom prevents that (below).
+The volume of the Legion Go 2 speakers is set in hardware after the digital signal,
+so a boost that crosses full scale would clip at any volume; the limiter turns such
+peaks down smoothly instead. On the device, with a -1 dBFS test ceiling, a +9 dB
+boosted 70 Hz tone stayed at -1.00 dBFS with 0.4–0.6% THD, where the unlimited
+signal reached +6.9 dBFS. The
+filter graph is therefore stereo: every filter runs once per channel (`band0_l`,
+`band0_r`, ...), sharing the same values. Presets and settings store `width` and
+`limiter` only when they differ from 100% and on, so DeckyEQ 1.0 still reads
+everything that does not use them; files without them get those defaults.
 
-With automatic headroom off, the same bound is still capped: if the summed
-boost exceeds +24 dB, the input level is lowered by the excess. This keeps an
-imported preset from adding extreme gain while the hardware runs at 100%. The
-original Go S preset sums to about +19 dB and is unaffected.
+**Volume boost** is a global setting, not part of a preset: the Legion Go 2 plays
+quieter under SteamOS than under Windows, whose audio driver adds its own gain and
+processing, while SteamOS's hardware mixer tops out at 0 dB. Automatic headroom never
+cancels the boost, and the limiter runs whenever the boost is above 0 dB, even for a
+preset whose limiter is off, so the boost cannot clip. Large boosts on already loud
+material are limited hard and can sound compressed. Moving the slider is a live edit
+like the EQ sliders; it is saved a second after the last change.
+
+Automatic headroom computes the combined response of all filters (bands and tone
+shelves, including resonance from adjustable-Q shelves, at 48 kHz), adds what
+widening can add (opposite-phase content grows by the full width, +6 dB at 200%),
+and lowers the
+input level. With the limiter on, it lowers it only by the part of the filter peak
+above +6 dB, so moderate boosts keep full loudness and the limiter catches the rest;
+a raised **Input level** is your deliberate gain and is kept, while a lowered one
+still counts as room. A volume boost turns the limiter on, so these rules then apply
+even to a preset whose limiter is off.
+With the limiter off, it lowers the input just enough that the loudest frequency,
+plus any positive **Input level**, stays 0.5 dB below unity. Boosts in different ranges do not add up: +6 dB
+bass and +6 dB treble need about -6.5 dB, not -12.5 dB, while filters stacked on the
+same frequency do add up. Boosting a range still makes everything else quieter by
+about the boost when the limiter is off; the panel shows the current compensation.
+Neither is a loudness normalizer or a guarantee against physical speaker distortion.
+
+With automatic headroom off, the peak is still capped: if the combined response
+plus input level exceeds +15 dB, the input level is lowered by the excess. This
+keeps an imported preset from adding extreme gain and clipping. The original Go S
+preset peaks at about +14.6 dB (+8 dB input plus filters) and is unaffected.
 
 The runtime lowers the input level before altering filters, makes large gain
-changes in several steps, then sets the final input level. The frontend coalesces
-fast drags; all backend transactions are serialized. Final parameters are read
-back before a change is treated as confirmed. Audible transition quality and
-perceived latency still require the hardware checks below.
+changes in several steps, reads the filters back, and only then raises the input
+level, also in steps. The frontend coalesces fast drags; all backend transactions
+are serialized. While audio plays, every change is read back from PipeWire before
+it is confirmed; a failed or interrupted write makes the next change read the
+filter afresh, so a rollback really restores the previous sound. Slider edits
+are kept in memory at once and saved to disk about one second after the last
+change (any other action saves immediately; unloading saves too).
 
-While enabled, the graph keeps processing even if no application is playing.
-This makes idle control readback reliable on PipeWire 1.6.8. Disable EQ when you
-want to stop its processing. The child uses isolated system Python and a clean
-library environment, rather than Decky's frozen PluginLoader executable.
+When nothing plays, the filter suspends together with its output and uses no CPU.
+A suspended filter keeps reporting its previous controls but stores new ones and
+applies them as soon as audio resumes (checked on PipeWire 1.6.8), so edits made
+while it is suspended are written without readback and verified by the monitor
+once audio flows. The child uses isolated system Python and a clean library
+environment, rather than Decky's frozen PluginLoader executable.
 
 Each slot contains three native biquads in series; only the selected type has
 nonzero gain. The fixed graph has 33 nodes per channel, including the input
@@ -123,46 +171,29 @@ Nyquist has no effect.
 
 ## Output switching and cleanup
 
-**Speaker port only** is enabled initially. It checks the actual selected
+**Speakers only** is enabled initially. It checks the actual selected
 output's active port; a missing/unknown port is bypassed rather than guessed.
 Turn it off if you deliberately want to EQ a selected headset, USB device or
 HDMI output. The monitor listens to PulseAudio events (`pactl subscribe`) and
 reacts to output, card and server changes about 0.15 seconds after a burst of
-events settles. Without events it checks every 15 seconds, including a full
-PipeWire control readback while EQ is active; if the event stream is unavailable
-it falls back to checking every 1.5 seconds. Every edit is read back at once.
+events settles. Without events it only re-reads the filter's controls every
+15 seconds while EQ is active; if the event stream is unavailable it falls back
+to checking every 1.5 seconds.
 After a failure, retries wait 8, 16, 32 and then 60 seconds. This is a software polling guard, not an instantaneous hardware
 interlock; there can be a short transition before bypass.
 
-A manual default-output change in Steam is respected. The physical output runs
-at 100% while EQ is active, so selecting it directly in Steam also bypasses EQ
-and transfers your volume back. EQ stays bypassed until another output is
-selected and the target returns, or until **Refresh / reconnect EQ** explicitly
-reactivates it. Enabling EQ or changing its output while Steam plays through
-another device, such as Bluetooth headphones, also waits; only **Refresh /
-reconnect EQ** takes playback over immediately.
-Unplugging the target pauses EQ; reconnecting it can restore the saved settings.
+Steam's output choice is never overridden. Unplugging the target pauses EQ;
+reconnecting it resumes with the saved settings.
 
-Turning **Enable EQ** off or unloading the plugin restores routing and terminates
-the owned filter process, while keeping the preset library. New streams that used
-DeckyEQ are also moved back. The filter runs under a small supervisor attached to
-Decky with a Linux parent-death signal. If the Decky backend dies, the supervisor
-first returns your EQ volume to the hardware output, then stops the filter; the
-audio session manager then moves playback to that output at your volume instead
-of the 100% hardware level used while EQ runs.
-
-A recovery journal records the previous default output and every volume that is
-still owed. Audio routes keep their own volume per port, so when a headphone plug
-or a disconnected Bluetooth device interrupts EQ, the restore waits for that
-device and port to return instead of being lost; it never blocks EQ on another
-output. If the hardware volume was changed in the meantime, that change is kept.
+Turning **Enable EQ** off or unloading the plugin only terminates the owned filter
+process, while keeping the preset library.
 
 The plugin never terminates an unrelated process. A pre-existing DeckyEQ sink
 that it does not own blocks activation with an explanatory error.
 
 ## Plugin updates
 
-**View → About → Updates** uses the release flow shared with SpotiDeck and Legion
+**About → Updates** uses the release flow shared with SpotiDeck and Legion
 Go 2 Companion. It checks `Rayekkk/DeckyEQ` only when requested, then downloads a
 newer stable `DeckyEQ-X.Y.Z.zip` with a matching GitHub asset digest. Installation
 remains a separate action in Decky's Developer settings. A repository with no
@@ -175,8 +206,11 @@ entry points, plugin identity, non-root flags and both manifest versions.
 
 ## Build and test locally
 
-Build dependencies: Node.js 20+ / npm and Python 3.10+. These are **development**
-requirements; users install the prebuilt ZIP.
+Build dependencies: Node.js 20+ / npm, Python 3.10+ and gcc for the native audio
+stage (on Windows, gcc inside WSL; `scripts/build_native.py` calls it). These are
+**development** requirements; users install the prebuilt ZIP, which contains the
+compiled x86-64 library. `tests/test_dsp.py` drives the library through its LADSPA
+interface on Linux (ceiling, delay, width, distortion of a boosted bass tone).
 
 ```sh
 npm ci
@@ -216,7 +250,7 @@ See [VALIDATION.md](VALIDATION.md) for the local evidence and remaining acceptan
 - `deckyeq/model.py`: preset schema, bounds, serialization and library operations.
 - `deckyeq/storage.py`: atomic storage and bounded file exchange.
 - `deckyeq/graph.py`: one fixed native PipeWire graph and named live controls.
-- `deckyeq/runtime.py`: process ownership, routing and verified control writes.
+- `deckyeq/runtime.py`: smart filter process ownership and verified control writes.
 - `deckyeq/service.py`: serialized transactions, rollback, monitoring and RPC state.
 - `main.py`: minimal Decky entry point with unprivileged lifecycle ownership.
 - `src/controller.ts`: one frontend write queue retained across QAM remounts.

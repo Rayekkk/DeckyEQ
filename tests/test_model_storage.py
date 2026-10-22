@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deckyeq.graph import controls, control_payload, filter_config, headroom, read_controls, same_controls
+from deckyeq.graph import STAGE_LIBRARY, controls, control_payload, filter_config, headroom, read_controls, same_controls
 from deckyeq.model import (EQError, create_preset, decode_import, export_document, flat_eq,
-                          initial_state, selected_preset, validate_eq, validate_state)
+                          initial_state, portable_state, selected_preset, validate_eq, validate_state)
 from deckyeq.storage import PresetFiles, Store
 
 
@@ -18,7 +18,7 @@ class PresetTests(unittest.TestCase):
         eq = flat_eq()
         self.assertEqual(validate_eq(eq), eq)
         self.assertEqual(headroom(eq)["effective_preamp"], 0)
-        self.assertEqual(controls(eq)["level:Mult"], 1)
+        self.assertEqual(controls(eq)["level_l:Mult"], 1)
 
     def test_portable_round_trip_preserves_all_settings(self):
         state = initial_state()
@@ -100,22 +100,27 @@ class GraphTests(unittest.TestCase):
         reloaded = json.loads(json.dumps(config))
         args = reloaded["context.modules"][-1]["args"]
         graph = args["filter.graph"]
-        self.assertEqual(len(graph["nodes"]), 33)
-        self.assertTrue(all(n["type"] == "builtin" for n in graph["nodes"]))
+        self.assertEqual(len(graph["nodes"]), 67)  # 33 native filters per channel and the stereo stage.
+        external = [n for n in graph["nodes"] if n["type"] != "builtin"]
+        self.assertEqual(external, [{"type": "ladspa", "name": "stage", "plugin": str(STAGE_LIBRARY),
+                                     "label": "deckyeq_stage", "control": {"width": 1.0, "gain": 0.0, "limit": 1.0,
+                                                                           "ceiling": 0.0, "release": 100.0}}])
         self.assertEqual(args["audio.position"], ["FL", "FR"])
-        self.assertEqual(args["playback.props"]["target.object"], 'alsa_output.target"quoted')
-        self.assertTrue(args["playback.props"]["node.dont-fallback"])
-        self.assertTrue(args["capture.props"]["node.always-process"])
-        self.assertEqual(len(graph["inputs"]), 1)  # auto duplicate graph per channel
-        self.assertEqual(len(graph["links"]), 32)
+        self.assertEqual(args["capture.props"]["filter.smart.target"], {"node.name": 'alsa_output.target"quoted'})
+        self.assertTrue(args["capture.props"]["filter.smart"])
+        self.assertNotIn("target.object", args["playback.props"])  # WirePlumber links the filter itself.
+        self.assertNotIn("node.always-process", args["capture.props"])  # Suspends with its output.
+        self.assertEqual(graph["inputs"], ["level_l:In", "level_r:In"])
+        self.assertEqual(graph["outputs"], ["stage:out_l", "stage:out_r"])
+        self.assertEqual(len(graph["links"]), 2 * 33)  # Each channel's chain, ending in the stage.
 
     def test_tone_filters_are_independent_from_ten_bells(self):
         eq = flat_eq()
         eq.update(bass=5, treble=-3)
         values = controls(eq)
-        self.assertEqual(values["bass:Gain"], 5)
-        self.assertEqual(values["treble:Gain"], -3)
-        self.assertEqual(sum(values[f"band{i}:Gain"] for i in range(10)), 0)
+        self.assertEqual(values["bass_l:Gain"], 5)
+        self.assertEqual(values["treble_l:Gain"], -3)
+        self.assertEqual(sum(values[f"band{i}_l:Gain"] for i in range(10)), 0)
 
     def test_runtime_payload_and_readback_shapes(self):
         expected = controls(flat_eq())
@@ -123,23 +128,103 @@ class GraphTests(unittest.TestCase):
             node = {"info": {"params": {"Props": [{"params": params}]}}}
             self.assertTrue(same_controls(read_controls(node), expected))
         incomplete = dict(expected)
-        incomplete.pop("band8:Gain")
+        incomplete.pop("band8_l:Gain")
         self.assertFalse(same_controls(incomplete, expected))
 
-    def test_overlapping_band_headroom_bound(self):
+    def test_headroom_follows_the_combined_response(self):
+        from deckyeq.graph import peak_gain
         eq = flat_eq()
-        for b in eq["bands"]: b.update(frequency=1000, gain=2)
-        eq.update(bass=3, treble=2, preamp=-1)
-        self.assertAlmostEqual(headroom(eq)["effective_preamp"], -26.5)
-        self.assertLess(10 ** (25 / 20) * controls(eq)["level:Mult"], 1)
-        eq["auto_headroom"] = False
-        self.assertAlmostEqual(headroom(eq)["effective_preamp"], -2)  # 25 dB summed boost, capped at 24.
+        eq.update(bass=6, treble=6, limiter=False)  # Different frequency ranges: the peak is ~6 dB, not 12.
+        self.assertAlmostEqual(headroom(eq)["compensation"], -6.5, places=2)
+        eq = flat_eq()
+        for b in eq["bands"]: b.update(frequency=1000, gain=2)  # Stacked on one frequency: they do add up.
+        eq.update(bass=3, treble=2, preamp=-1, limiter=False)
+        self.assertGreater(peak_gain(eq), 20)
+        self.assertAlmostEqual(eq["preamp"] + peak_gain(eq) + headroom(eq)["compensation"], -0.5, places=3)
+        eq["auto_headroom"] = False  # Manual: only the part above the cap is taken off.
+        from deckyeq.graph import MAX_BOOST
+        self.assertAlmostEqual(headroom(eq)["compensation"], min(0, MAX_BOOST - eq["preamp"] - peak_gain(eq)), places=3)
+
+    def test_the_limiter_keeps_moderate_boosts_loud(self):
+        from deckyeq.graph import ALLOWANCE, peak_gain
+        eq = flat_eq()
+        eq.update(bass=6)  # Up to ALLOWANCE dB the limiter catches peaks: no level drop at all.
+        self.assertEqual(headroom(eq)["compensation"], 0)
+        eq.update(bass=9)  # Beyond it, only the excess is taken off.
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
+        eq.update(limiter=False)
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) + 0.5), places=4)
+
+    def test_input_level_with_the_limiter(self):
+        from deckyeq.graph import ALLOWANCE, peak_gain
+        eq = flat_eq()
+        eq.update(bass=9, preamp=4)  # A raised input level is deliberate: only the excess EQ boost counts.
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
+        eq.update(preamp=-12)  # A lowered one is room: no extra drop on top of it.
+        self.assertEqual(headroom(eq)["compensation"], 0)
+        eq.update(preamp=4, limiter=False)  # A boost forces the limiter on, and headroom knows it.
+        self.assertAlmostEqual(headroom(eq, boost=6)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) + 4 + 0.5), places=4)
+
+    def test_boost_sets_the_stage_gain_and_forces_the_limiter(self):
+        eq = flat_eq()
+        eq["limiter"] = False
+        self.assertEqual((controls(eq)["stage:gain"], controls(eq)["stage:limit"]), (0.0, 0.0))
+        self.assertEqual((controls(eq, 6)["stage:gain"], controls(eq, 6)["stage:limit"]), (6.0, 1.0))
+
+    def test_widening_counts_as_boost(self):
+        eq = flat_eq()
+        eq.update(width=2.0, limiter=False)  # Opposite-phase content (L = -R) doubles.
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(20 * math.log10(2) + 0.5), places=4)
+        eq.update(width=0.5)  # Narrowing never adds level.
+        self.assertEqual(headroom(eq)["compensation"], 0)
+        values = controls(eq)
+        self.assertEqual((values["stage:width"], values["stage:limit"]), (0.5, 0.0))
+
+    def test_settings_carry_the_boost_only_when_raised(self):
+        state = initial_state()
+        self.assertNotIn("boost", portable_state(state))
+        state["boost"] = 4.5
+        self.assertEqual(portable_state(state)["boost"], 4.5)
+        self.assertEqual(validate_state(portable_state(state))["boost"], 4.5)
+        state["boost"] = 13
+        with self.assertRaises(EQError):
+            validate_state(state)
+
+    def test_files_carry_width_and_limiter_only_when_changed(self):
+        # DeckyEQ 1.0 accepts exactly the older keys: unchanged presets and settings stay readable to it.
+        state = initial_state()
+        self.assertNotIn("width", export_document(state)["preset"]["eq"])
+        state["working"] = {**flat_eq(), "width": 1.5, "limiter": False}
+        exported = export_document(state)["preset"]["eq"]
+        self.assertEqual((exported["width"], exported["limiter"]), (1.5, False))
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "settings")
+            store.save(state)
+            written = json.loads(store.path.read_text(encoding="utf-8"))
+            self.assertEqual(written["working"]["width"], 1.5)
+            state["working"] = flat_eq()
+            store.save(state)
+            self.assertNotIn("width", json.loads(store.path.read_text(encoding="utf-8"))["working"])
+            self.assertEqual(json.loads(store.backup.read_text(encoding="utf-8"))["working"]["width"], 1.5)
+            self.assertEqual(store.load()["working"], flat_eq())
+
+    def test_presets_without_width_or_limiter_get_the_defaults(self):
+        eq = flat_eq()
+        del eq["width"], eq["limiter"]
+        self.assertEqual(validate_eq(eq), flat_eq())
+        eq["width"] = 3
+        with self.assertRaises(EQError):
+            validate_eq(eq)
+        eq.update(width=1, limiter="yes")
+        with self.assertRaises(EQError):
+            validate_eq(eq)
 
     def test_pw_dump_rounding_at_low_input_level(self):
-        expected = {"level:Mult": 0.008358531817878144}
-        self.assertTrue(same_controls({"level:Mult": 0.008359}, expected))
-        self.assertFalse(same_controls({"level:Mult": 0.0084}, expected))
-        self.assertFalse(same_controls({"level:Mult": 0}, expected))
+        expected = {"level_l:Mult": 0.008358531817878144}
+        self.assertTrue(same_controls({"level_l:Mult": 0.008359}, expected))
+        self.assertFalse(same_controls({"level_l:Mult": 0.0084}, expected))
+        self.assertFalse(same_controls({"level_l:Mult": 0}, expected))
 
 
 class HardeningTests(unittest.TestCase):

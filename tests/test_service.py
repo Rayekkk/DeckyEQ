@@ -33,14 +33,13 @@ class FakeRuntime:
         return True
     async def close_events(self): self.events.append("close_events")
     async def scan(self): return self.outputs, self.default
-    async def start(self, eq, target):
+    async def start(self, eq, target, boost=0.0):
         self.events.append("start")
         self.process, self.target = object(), target
-        self.default = SINK_NAME
-        self.eq = copy.deepcopy(eq)
-    async def apply(self, eq, max_age=0.0):
+        self.eq, self.boost = copy.deepcopy(eq), boost
+    async def apply(self, eq, max_age=0.0, boost=0.0):
         self.events.append("apply")
-        self.eq = copy.deepcopy(eq)
+        self.eq, self.boost = copy.deepcopy(eq), boost
         if self.gate: await self.gate.wait()
         if self.fail_next:
             self.fail_next = False
@@ -48,7 +47,6 @@ class FakeRuntime:
     async def stop(self):
         self.events.append("stop")
         self.process = self.target = None
-        if self.default == SINK_NAME: self.default = "alsa_output.speakers"
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -80,14 +78,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_disk_error_rolls_back_live_audio_and_settings(self):
         await self.act("enable", enabled=True)
         old = copy.deepcopy(self.service.data)
-        eq = flat_eq()
-        eq["treble"] = 5
         with patch.object(self.store, "save", side_effect=OSError("Disk full")):
-            result = await self.act("edit", eq=eq)
+            result = await self.act("select", id="go-s-original")  # Saved at once, unlike drafts.
         self.assertFalse(result["ok"])
         self.assertEqual(self.service.data, old)
         self.assertEqual(self.runtime.eq, old["working"])
-
     async def test_partial_audio_failure_rolls_back_without_save(self):
         await self.act("enable", enabled=True)
         old = copy.deepcopy(self.service.data)
@@ -134,50 +129,6 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service._sync(self.service.data)
         self.assertTrue(self.runtime.running)
 
-    async def test_manual_output_switch_not_stolen_by_edits(self):
-        await self.act("enable", enabled=True)
-        self.runtime.default = "bluez_output.headset"
-        eq = flat_eq()
-        eq["treble"] = 3
-        await self.act("edit", eq=eq)
-        self.assertEqual(self.runtime.default, "bluez_output.headset")
-        await self.service._sync(self.service.data)  # The monitor handles the output-change event.
-        self.assertFalse(self.runtime.running)
-        self.assertEqual(self.runtime.default, "bluez_output.headset")
-        self.assertEqual(self.service.phase, "bypassed")
-
-    async def test_selecting_hardware_in_steam_bypasses_instead_of_playing_at_full_volume(self):
-        await self.act("enable", enabled=True)
-        self.runtime.default = "alsa_output.speakers"
-        await self.service._sync(self.service.data)
-        self.assertEqual(self.service.phase, "bypassed")
-        self.assertIsNone(self.runtime.process)
-        await self.service._sync(self.service.data)
-        self.assertEqual(self.runtime.events.count("start"), 1)
-        self.runtime.default = "bluez_output.headset"
-        await self.service._sync(self.service.data)
-        self.runtime.default = "alsa_output.speakers"
-        await self.service._sync(self.service.data)
-        self.assertEqual(self.service.phase, "active")
-        self.assertEqual(self.runtime.default, SINK_NAME)
-
-    async def test_refresh_reroutes_after_hardware_was_selected_in_steam(self):
-        await self.act("enable", enabled=True)
-        self.runtime.default = "alsa_output.speakers"
-        self.assertTrue((await self.act("refresh"))["ok"])
-        self.assertEqual(self.runtime.events.count("start"), 2)
-        self.assertEqual(self.runtime.default, SINK_NAME)
-        self.assertEqual(self.service.phase, "active")
-
-    async def test_enabling_while_bluetooth_is_selected_waits_instead_of_taking_playback(self):
-        self.runtime.default = "bluez_output.headset"
-        self.assertTrue((await self.act("enable", enabled=True))["ok"])
-        self.assertNotIn("start", self.runtime.events)
-        self.assertEqual(self.runtime.default, "bluez_output.headset")
-        self.assertEqual(self.service.phase, "bypassed")
-        self.assertTrue((await self.act("refresh"))["ok"])
-        self.assertEqual(self.runtime.default, SINK_NAME)
-
     async def test_disabled_monitor_does_not_poll_audio_tools(self):
         with patch.object(self.runtime, "scan", side_effect=AssertionError("scanned while off")):
             await self.service._sync(self.service.data)
@@ -193,8 +144,51 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime, "scan", side_effect=AssertionError("rescanned")), \
                 patch.object(self.store, "save", wraps=self.store.save) as save:
             self.assertTrue((await self.act("edit", eq=eq))["ok"])
+            save.assert_not_called()  # Saved after the drag settles, not on every step.
+            await asyncio.wait_for(self.service.draft_task, 3)
         self.assertEqual(self.runtime.eq["bass"], 2)
         self.assertFalse(save.call_args.kwargs["backup"])
+        self.assertEqual(self.store.load()["working"]["bass"], 2)
+
+    async def test_volume_boost_is_a_live_global_setting(self):
+        await self.act("enable", enabled=True)
+        starts = self.runtime.events.count("start")
+        eq = copy.deepcopy(self.service.data["working"])
+        self.assertTrue((await self.act("edit", eq=eq, boost=6))["ok"])
+        self.assertEqual((self.runtime.boost, self.runtime.events.count("start")), (6.0, starts))
+        snapshot = self.service.snapshot()
+        self.assertEqual(snapshot["state"]["boost"], 6.0)
+        self.assertFalse(snapshot["dirty"])  # Not part of the preset.
+        await self.act("select", id="go-s-original")
+        self.assertEqual(self.runtime.boost, 6.0)  # Survives a preset change.
+        self.assertFalse((await self.act("edit", eq=eq, boost=13))["ok"])
+        self.service._save_draft()
+        self.assertEqual(self.store.load()["boost"], 6.0)
+        self.runtime.fail_next = True  # A failed write puts the previous boost back.
+        self.assertFalse((await self.act("edit", eq=self.service.data["working"], boost=3))["ok"])
+        self.assertEqual((self.runtime.boost, self.service.data["boost"]), (6.0, 6.0))
+
+    async def test_failed_draft_save_is_reported_and_keeps_the_sound(self):
+        await self.act("enable", enabled=True)
+        eq = flat_eq()
+        eq["bass"] = 4
+        await self.act("edit", eq=eq)
+        with patch.object(self.store, "save", side_effect=OSError("Disk full")):
+            self.service._save_draft()
+        self.assertIn("could not be saved", self.service.snapshot()["warning"])
+        self.assertEqual(self.runtime.eq["bass"], 4)
+        self.service._save_draft()
+        self.assertIsNone(self.service.snapshot()["warning"])
+
+    async def test_slider_edits_while_paused_do_not_restart_the_filter(self):
+        await self.act("enable", enabled=True)
+        await self.runtime.stop()
+        self.service._failed(EQError("output vanished"))
+        eq = flat_eq()
+        eq["bass"] = 5
+        self.assertTrue((await self.act("edit", eq=eq))["ok"])
+        self.assertEqual(self.runtime.events.count("start"), 1)
+        self.assertEqual(self.service.data["working"]["bass"], 5)
 
     async def test_repeated_failures_back_off_up_to_a_minute(self):
         delays = []
@@ -233,6 +227,35 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(service.monitor)
         self.assertIsNone(service.runtime.process)
 
+    async def test_other_output_in_steam_puts_eq_on_standby_without_switching(self):
+        await self.act("enable", enabled=True)
+        self.assertEqual(self.service.phase, "active")
+        self.runtime.default = "bluez_output.headset"
+        await self.service._sync(self.service.data)
+        self.assertEqual(self.service.phase, "standby")
+        self.assertTrue(self.runtime.running)
+        self.assertEqual(self.runtime.default, "bluez_output.headset")
+        self.runtime.default = "alsa_output.speakers"
+        await self.service._sync(self.service.data)
+        self.assertEqual(self.service.phase, "active")
+        self.assertEqual(self.runtime.events.count("start"), 1)
+
+    async def test_enabling_while_bluetooth_plays_leaves_playback_where_it_is(self):
+        self.runtime.default = "bluez_output.headset"
+        self.assertTrue((await self.act("enable", enabled=True))["ok"])
+        self.assertEqual(self.service.data["target"], "alsa_output.speakers")
+        self.assertEqual(self.runtime.default, "bluez_output.headset")
+        self.assertEqual(self.service.phase, "standby")
+
+    async def test_edits_never_change_the_output(self):
+        await self.act("enable", enabled=True)
+        self.runtime.default = "bluez_output.headset"
+        eq = flat_eq()
+        eq["treble"] = 3
+        self.assertTrue((await self.act("edit", eq=eq))["ok"])
+        self.assertEqual(self.runtime.eq["treble"], 3)
+        self.assertEqual(self.runtime.default, "bluez_output.headset")
+
     async def test_output_disconnection_waits_without_retargeting(self):
         await self.act("enable", enabled=True)
         self.runtime.outputs = self.runtime.outputs[1:]
@@ -252,6 +275,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.service.lock.locked())
         self.runtime.gate.set()
         with self.assertRaises(asyncio.CancelledError): await task
+        self.service._save_draft()  # Drafts reach the disk DRAFT_SAVE_SECONDS later.
         self.assertEqual(self.store.load()["working"]["bass"], 2)
         self.assertFalse(self.service.lock.locked())
 
@@ -268,6 +292,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError): await task
         await asyncio.sleep(0.01)
         self.assertEqual(self.service.data["working"]["bass"], 3)
+        self.service._save_draft()
         self.assertEqual(self.store.load()["working"]["bass"], 3)
 
     async def test_status_answers_while_a_transaction_holds_the_lock(self):
@@ -324,6 +349,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await self.act("delete", id="flat")
         self.assertFalse(result["ok"])
         self.assertEqual([p["id"] for p in self.service.data["presets"]], [kept])
+        await self.act("save_as", name="Other")
+        result = await self.act("rename", name="Renamed", id=kept)  # A rename dialog opened for "Keep me".
+        self.assertFalse(result["ok"])
+        self.assertEqual([p["name"] for p in self.service.data["presets"]], ["Keep me", "Other"])
+        await self.act("select", id=kept)
         self.assertTrue((await self.act("delete", id=kept))["ok"])
 
     async def test_flat_cannot_be_overwritten_renamed_or_deleted(self):

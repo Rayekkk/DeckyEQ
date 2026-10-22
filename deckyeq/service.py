@@ -8,11 +8,13 @@ import time
 from pathlib import Path
 
 from .graph import SINK_NAME, headroom
-from .model import (EQError, FACTORY_IDS, MAX_PRESETS, create_preset, decode_import, export_document,
-                    flat_eq, name, presets, selected_preset, validate_eq, validate_state)
+from .model import (EQError, FACTORY_IDS, LIMITS, MAX_PRESETS, create_preset, decode_import, export_document,
+                    flat_eq, name, number, presets, selected_preset, validate_eq, validate_state)
 
 VERSION = json.loads((Path(__file__).resolve().parent.parent / "package.json").read_text(encoding="utf-8"))["version"]
-VERIFY_SECONDS = 15  # Monitor heartbeat and full PipeWire readback interval; edits always verify.
+VERIFY_SECONDS = 15  # Monitor heartbeat: re-reads the filter's controls; edits always read back.
+DRAFT_SAVE_SECONDS = 1.0  # Slider edits reach the disk this long after the last one (not per step).
+DRAFT_WARNING = "Your latest edits could not be saved: "
 ERROR_PAUSE_SECONDS = 2  # After an unexpected monitor error, so a repeating failure cannot spin the loop.
 
 
@@ -29,7 +31,7 @@ class Service:
         self.closed = False
         self.retry_at = 0.0
         self.failures = 0
-        self.held = None  # Output picked directly in Steam while EQ ran; bypass until it changes.
+        self.draft_task = None  # Pending save of slider edits; any other change saves at once.
 
     async def start(self):
         # Serialized with close(): an unload during startup must not leave routing or a monitor behind.
@@ -38,7 +40,7 @@ class Service:
                 return
             if self.runtime.supported:
                 try:
-                    await self.runtime.recover()
+                    await self._recover()
                     await self._sync(self.data)
                     if not self.data["enabled"]:
                         await self.runtime.scan()  # The idle monitor rescans only on audio events.
@@ -64,9 +66,13 @@ class Service:
                 async with self.lock:
                     if self.closed or not self.runtime.supported:
                         continue
+                    if changed and self.runtime.process is None:
+                        await self._recover()  # A device owed a DeckyEQ 1.0 restore may have returned.
                     if time.monotonic() < self.retry_at:
-                        if self.runtime.process is None:
-                            await self.runtime.recover()  # Owed volume restores do not wait for the backoff.
+                        continue
+                    if not changed and self.runtime.running:
+                        # Heartbeat: outputs only change with an event, so just re-verify the filter.
+                        await self.runtime.apply(self.data["working"], VERIFY_SECONDS, self.data["boost"])
                         continue
                     if changed and not self.data["enabled"]:
                         await self.runtime.scan()  # Keep the output list current while EQ is off.
@@ -78,63 +84,50 @@ class Service:
                     try:
                         await self.runtime.stop()
                     except Exception:
-                        pass  # stop() keeps its journal; the next start restores routing.
+                        pass  # Without the filter, playback continues on the output directly.
                     self._failed(exc)
                 await asyncio.sleep(ERROR_PAUSE_SECONDS)
 
-    async def _sync(self, data, explicit=False, force=False, max_age=0.0):
-        """explicit: a user action, which resumes a manual bypass. force: Refresh, which also
-        takes playback from another output that is selected in Steam."""
+    async def _recover(self):
+        """Settle a journal left by DeckyEQ 1.0. Never fatal: it must not block EQ or the monitor."""
+        try:
+            await self.runtime.recover()
+        except (EQError, OSError):
+            pass
+
+    async def _sync(self, data, max_age=0.0):
+        """Bring the filter in line with data. It never changes outputs, streams or volumes."""
         runtime = self.runtime
         if not runtime.supported:
             if data["enabled"]:
                 raise EQError(runtime.reason)
             self.phase, self.message = "unavailable", runtime.reason
             return
-        if runtime.process is None:
-            # Finish volume restores owed to a device or port that has returned; a file check otherwise.
-            await runtime.recover()
         if not data["enabled"]:
-            # No scan here: while EQ is off the monitor only checks for a pending restore journal.
             if runtime.process is not None:
                 await runtime.stop()
             self.phase, self.message, self.error = "off", "EQ is off. Your presets are kept.", None
             return
         outputs, default = await runtime.scan()
         target = next((o for o in outputs if o["name"] == data["target"]), None)
-        bypass = self._bypass(data, target, default, explicit, force)
-        if bypass:
+        if target is None or (data["speakers_only"] and not target["speaker"]):
             if runtime.process is not None:
                 await runtime.stop()
-            self.phase, self.message, self.error = *bypass, None
+            self.phase, self.error = "waiting" if target is None else "bypassed", None
+            self.message = ("Waiting for the selected audio output." if target is None
+                            else "Bypassed: the selected output is not using its speaker port.")
             return
-        if not runtime.running or runtime.target != data["target"] or default != SINK_NAME:
-            await runtime.start(data["working"], data["target"])
+        if not runtime.running or runtime.target != data["target"]:
+            await runtime.start(data["working"], data["target"], data["boost"])
         else:
-            await runtime.apply(data["working"], max_age)
-        self.phase, self.message, self.error = "active", "Live EQ · " + target["description"], None
-        self.retry_at, self.failures = 0, 0
-
-    def _bypass(self, data, target, default, explicit, force):
-        """Why EQ must not play right now, as (phase, message), or None to play."""
-        if target is None:
-            return "waiting", "Waiting for the selected audio output."
-        if data["speakers_only"] and not target["speaker"]:
-            return "bypassed", "Bypassed: the selected output is not using its speaker port."
-        if explicit:
-            self.held = None
-        elif self.runtime.running and default != SINK_NAME:
-            # The hardware is at 100% while EQ runs; playing to it directly would be loud.
-            self.held = default
-        elif self.held is not None and self.held != default:
-            self.held = None
-        if force:
-            return None
-        if self.held is not None:
-            return "bypassed", "Bypassed: an output was selected directly in Steam. Use Refresh in Output to resume EQ."
-        if default not in (SINK_NAME, data["target"]):
-            return "bypassed", "Bypassed: another audio output is selected in Steam."
-        return None
+            await runtime.apply(data["working"], max_age, data["boost"])
+        # Playback that Steam sends elsewhere does not pass the filter; apps that pick the target
+        # themselves still do, so "standby" describes Steam's output, not every stream.
+        playing = default in (data["target"], SINK_NAME)
+        self.phase = "active" if playing else "standby"
+        self.message = ("Live EQ · " + target["description"] if playing else
+                        f"Standby · Steam is playing to another output. EQ applies to {target['description']}.")
+        self.error, self.retry_at, self.failures = None, 0, 0
 
     def snapshot(self):
         selected = selected_preset(self.data)
@@ -145,7 +138,7 @@ class Service:
                 "audio": {"supported": self.runtime.supported, "phase": self.phase,
                           "message": self.message, "error": self.error,
                           "outputs": copy.deepcopy(self.runtime.outputs), "default": self.runtime.default,
-                          **headroom(self.data["working"])},
+                          **headroom(self.data["working"], self.data["boost"])},
                 "warning": self.store.warning, "home": str(self.files.home),
                 "export_directory": str(self.files.default_directory)}
 
@@ -179,7 +172,7 @@ class Service:
                 if not isinstance(payload, dict):
                     raise EQError("Invalid request.")
                 if action == "refresh":
-                    await self._sync(self.data, explicit=True, force=True)
+                    await self._sync(self.data)
                     return {"ok": True, "state": self.snapshot()}
                 if action == "export":
                     path = self._export(payload)
@@ -188,30 +181,36 @@ class Service:
                 if handler is None:
                     raise EQError("Unknown DeckyEQ action.")
                 updated = copy.deepcopy(self.data)
-                note, explicit = await handler(self, updated, payload) or (None, False)
+                note = await handler(self, updated, payload)
                 # A draft edit keeps the previous settings backup; library changes refresh it.
-                await self._commit(validate_state(updated), backup=action != "edit", explicit=explicit)
+                await self._commit(validate_state(updated), backup=action != "edit")
                 return {"ok": True, "state": self.snapshot(), "message": note}
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 return {"ok": False, "error": str(exc), "state": self.snapshot()}
 
-    async def _commit(self, updated, backup, explicit):
-        """Apply a validated state to audio, then to disk; any failure restores the previous sound."""
+    async def _commit(self, updated, backup):
+        """Apply a validated state to audio, then to disk; any failure restores the previous sound.
+        Slider edits (backup=False) are saved DRAFT_SAVE_SECONDS after the last one."""
         old = self.data
         if updated == old:
             return
-        # Editing a library entry must not touch audio or steal a manual output selection.
+        # Editing a library entry must not touch audio.
         audio = [key for key in AUDIO_KEYS if updated[key] != old[key]]
+        draft_only = bool(audio) and set(audio) <= {"working", "boost"}
         try:
-            if audio == ["working"] and self.phase == "active" and self.runtime.running:
-                await self.runtime.apply(updated["working"])  # A slider edit needs no output rescan.
-            elif audio:
-                await self._sync(updated, explicit=explicit)
-            self.store.save(updated, backup=backup)
+            if draft_only and self.phase in ("active", "standby") and self.runtime.running:
+                # A slider edit needs no output rescan.
+                await self.runtime.apply(updated["working"], boost=updated["boost"])
+            elif audio and not (draft_only and time.monotonic() < self.retry_at):
+                # While audio is paused after a failure, a draft edit is only kept; the monitor
+                # applies it when it retries, instead of every slider step restarting the filter.
+                await self._sync(updated)
+            if backup:
+                self.store.save(updated, backup=True)
         except Exception as exc:
             try:
                 if audio:
-                    await self._sync(old, explicit=explicit)
+                    await self._sync(old)
             except Exception as rollback:
                 try:
                     await self.runtime.stop()
@@ -220,6 +219,31 @@ class Service:
                 self._failed(EQError(f"{exc} Rollback: {rollback}"))
             raise EQError(str(exc)) from None
         self.data, self.revision = updated, self.revision + 1
+        if backup:
+            self._cancel_draft()
+        else:
+            self._cancel_draft()
+            self.draft_task = asyncio.create_task(self._save_draft_later())
+
+    def _cancel_draft(self):
+        if self.draft_task is not None and not self.draft_task.done():
+            self.draft_task.cancel()
+        self.draft_task = None
+
+    async def _save_draft_later(self):
+        await asyncio.sleep(DRAFT_SAVE_SECONDS)
+        async with self.lock:
+            self._save_draft()
+
+    def _save_draft(self):
+        self.draft_task = None
+        try:
+            self.store.save(self.data, backup=False)
+        except (EQError, OSError) as exc:
+            self.store.warning = DRAFT_WARNING + str(exc)
+            return
+        if self.store.warning and self.store.warning.startswith(DRAFT_WARNING):
+            self.store.warning = None
 
     def _export(self, payload):
         all_presets = payload.get("all", False)
@@ -228,11 +252,12 @@ class Service:
         title = "DeckyEQ-presets" if all_presets else selected_preset(self.data)["name"]
         return self.files.write(export_document(self.data, all_presets), title, payload.get("directory"))
 
-    # Action handlers edit a copy of the settings. They may return (note for the user, explicit),
-    # where explicit marks a routing request that also resumes a manual bypass.
+    # Action handlers edit a copy of the settings and may return a note for the user.
 
     async def _do_edit(self, state, payload):
         state["working"] = validate_eq(payload.get("eq"))
+        if "boost" in payload:  # Dragged like a slider, so it travels with slider edits.
+            state["boost"] = number(payload["boost"], *LIMITS["boost"], "Volume boost")
 
     async def _do_enable(self, state, payload):
         if type(payload.get("enabled")) is not bool:
@@ -246,15 +271,13 @@ class Service:
                            (o["speaker"] or not state["speakers_only"])), None)
             target = target or next((o for o in outputs if o["speaker"]), None)
             if not target:
-                raise EQError("Choose a connected audio output in Output & settings first.")
+                raise EQError("Choose a connected audio output in Output first.")
             state["target"] = target["name"]
-        return None, True
 
     async def _do_output(self, state, payload):
         if type(payload.get("speakers_only")) is not bool:
             raise EQError("Invalid speaker port setting.")
         state["target"], state["speakers_only"] = payload.get("target"), payload["speakers_only"]
-        return None, True
 
     async def _do_select(self, state, payload):
         preset = selected_preset(state, payload.get("id"))
@@ -267,6 +290,7 @@ class Service:
         self._user_preset(state, "Built-in presets are read-only. Use Save as new preset.")["eq"] = copy.deepcopy(state["working"])
 
     async def _do_rename(self, state, payload):
+        self._confirmed(state, payload)
         title = name(payload.get("name"))
         preset = self._user_preset(state, "Built-in presets cannot be renamed.")
         if any(p["name"].casefold() == title.casefold() and p["id"] != preset["id"] for p in presets(state)):
@@ -292,7 +316,7 @@ class Service:
             raise EQError("Not enough room in the preset library. Remove unused presets first.")
         for entry in entries:
             create_preset(state, entry["name"], entry["eq"])
-        return f"Imported {len(entries)} preset{'s' if len(entries) != 1 else ''}. Select one to hear it.", False
+        return f"Imported {len(entries)} preset{'s' if len(entries) != 1 else ''}. Select one to hear it."
 
     @staticmethod
     def _user_preset(state, factory_error):
@@ -311,8 +335,11 @@ class Service:
 
     async def close(self):
         self.closed = True
-        # Cancel the monitor only between transactions: a cancelled stop() cannot restore volume.
+        # Cancel the monitor only between transactions, and keep unsaved slider edits.
         async with self.lock:
+            if self.draft_task is not None:
+                self._cancel_draft()
+                self._save_draft()
             if self.monitor:
                 self.monitor.cancel()
                 await asyncio.gather(self.monitor, return_exceptions=True)
@@ -320,7 +347,7 @@ class Service:
             await self.runtime.close_events()
 
 
-AUDIO_KEYS = ("enabled", "working", "target", "speakers_only")
+AUDIO_KEYS = ("enabled", "working", "target", "speakers_only", "boost")
 # The RPC action names; renaming a handler must not silently change the frontend contract.
 HANDLERS = {"edit": Service._do_edit, "enable": Service._do_enable, "output": Service._do_output,
             "select": Service._do_select, "save_as": Service._do_save_as, "save": Service._do_save,

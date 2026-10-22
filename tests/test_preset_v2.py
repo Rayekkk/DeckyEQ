@@ -4,7 +4,7 @@ import math
 import unittest
 from pathlib import Path
 
-from deckyeq.graph import controls, headroom, shelf_peak
+from deckyeq.graph import controls, headroom, peak_gain, response_db
 from deckyeq.model import (EQError, create_preset, decode_import, export_document,
                           flat_eq, go_s_eq, initial_state, validate_state)
 
@@ -65,41 +65,65 @@ class OriginalPresetTests(unittest.TestCase):
         self.assertEqual([b["gain"] for b in eq["bands"]], [-10, -4, 5, 5, -5, -5, -5, -5, 0, 0])
         self.assertTrue(all(b["q"] == 1 for b in eq["bands"]))
         values = controls(eq)
-        self.assertAlmostEqual(values["level:Mult"], 10 ** (8 / 20))
+        self.assertAlmostEqual(values["level_l:Mult"], 10 ** (8 / 20))
         self.assertEqual(headroom(eq)["compensation"], 0)
-        self.assertEqual(values["band0_low:Gain"], -10)
-        self.assertEqual(values["band5_high:Gain"], -5)
-        self.assertEqual(values["band0:Gain"], 0)
-        self.assertEqual(values["band5:Gain"], 0)
+        self.assertEqual(values["band0_low_l:Gain"], -10)
+        self.assertEqual(values["band5_high_l:Gain"], -5)
+        self.assertEqual(values["band0_l:Gain"], 0)
+        self.assertEqual(values["band5_l:Gain"], 0)
 
     def test_positive_preamp_is_compensated_only_when_requested(self):
         eq = flat_eq()
-        eq["preamp"] = 8
+        eq["preamp"] = 8  # With the limiter, the input level is deliberate gain: kept.
+        self.assertEqual(headroom(eq), {"compensation": 0.0, "effective_preamp": 8.0})
+        eq["limiter"] = False
         self.assertEqual(headroom(eq), {"compensation": -8.5, "effective_preamp": -0.5})
         eq["auto_headroom"] = False
         self.assertEqual(headroom(eq), {"compensation": 0, "effective_preamp": 8})
 
-    def test_shelf_bound_covers_independent_sampled_analog_response(self):
-        # Evaluate the prototype at s=j*w, independently of the extremum solver.
-        # The bilinear transform maps this positive-frequency axis to the digital one.
-        for gain in (-12, -5, -0.5, 0, 0.5, 5, 12):
-            for q in (0.2, 0.7071067811865476, 1, 2.3, 5):
-                a = 10 ** (gain / 40)
-                measured = max(0, gain)
-                for i in range(2001):
-                    s = 1j * 10 ** (-4 + i * 8 / 2000)
-                    response = a * (s * s + math.sqrt(a) / q * s + a) / (a * s * s + math.sqrt(a) / q * s + 1)
-                    measured = max(measured, 20 * math.log10(abs(response)))
-                bound = shelf_peak(gain, q)
-                self.assertGreaterEqual(bound + 1e-10, measured, (gain, q))
-                self.assertAlmostEqual(bound, measured, delta=0.012, msg=str((gain, q)))
-
+    def test_filter_response_matches_the_filter_definitions(self):
+        self.assertAlmostEqual(response_db("peaking", 1000, 1.4, 6, [1000])[0], 6, places=6)
+        low, high = response_db("lowshelf", 1000, 0.7071, 6, [20, 20000])
+        self.assertAlmostEqual(low, 6, places=1)
+        self.assertAlmostEqual(high, 0, places=1)
+        low, high = response_db("highshelf", 1000, 0.7071, -6, [20, 20000])
+        self.assertAlmostEqual(low, 0, places=1)
+        self.assertAlmostEqual(high, -6, places=1)
+        # Frequencies PipeWire clamps to 0 Hz or Nyquist become constant gains.
+        self.assertEqual(response_db("lowshelf", 48000, 1, 4, [100]), [4])
+        self.assertEqual(response_db("peaking", 40000, 1, 4, [100]), [0])
     def test_manual_headroom_caps_extreme_boost(self):
         eq = flat_eq()
         eq.update(auto_headroom=False, preamp=12)
         for band in eq["bands"]:
             band["gain"] = 12
-        self.assertEqual(headroom(eq), {"compensation": -108, "effective_preamp": -96})
+        compensation = headroom(eq)["compensation"]
+        self.assertLess(compensation, 0)
+        from deckyeq.graph import MAX_BOOST
+        self.assertAlmostEqual(eq["preamp"] + peak_gain(eq) + compensation, MAX_BOOST, places=3)
+
+    def test_peak_matches_a_dense_brute_force_scan(self):
+        import random
+        from deckyeq.graph import NYQUIST, SHELF_Q, biquad, gain_db
+        from deckyeq.model import FILTER_TYPES
+        def brute(eq):
+            filters = [(b["type"], b["frequency"], b["q"], b["gain"]) for b in eq["bands"] if b["gain"]]
+            filters += [("lowshelf", 120.0, SHELF_Q, eq["bass"]), ("highshelf", 6000.0, SHELF_Q, eq["treble"])]
+            designs = [biquad(*f) for f in filters]
+            points = [NYQUIST * i / 6000 for i in range(6001)] + [10 * 1.002 ** i for i in range(4000)]
+            return max(sum(gain_db(d, hz) for d in designs) for hz in points if hz <= NYQUIST)
+        eq = flat_eq()  # The audit's case: the true peak is at 0 Hz, below the 10 Hz grid start.
+        eq["bands"][0].update(type="lowshelf", gain=12, frequency=31.5)
+        eq["bands"][1].update(gain=-12, q=0.2, frequency=20)
+        self.assertAlmostEqual(peak_gain(eq), 12, places=3)
+        rng = random.Random(11)
+        for _ in range(8):
+            eq = flat_eq()
+            for band in eq["bands"]:
+                band.update(type=rng.choice(FILTER_TYPES), gain=rng.uniform(-12, 12), q=rng.uniform(0.2, 5),
+                            frequency=rng.uniform(20, 20000))
+            eq.update(bass=rng.uniform(-9, 9), treble=rng.uniform(-9, 9))
+            self.assertGreaterEqual(peak_gain(eq) + 0.01, brute(eq))
 
     def test_negative_resonant_shelf_also_requires_headroom(self):
         eq = flat_eq()

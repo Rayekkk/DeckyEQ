@@ -6,6 +6,7 @@
     "enabled": false,
     "target": "",
     "speakers_only": true,
+    "boost": 0.0,
     "selected": "flat",
     "working": {
       "bands": [
@@ -73,7 +74,9 @@
       "bass": 0.0,
       "treble": 0.0,
       "preamp": 0.0,
-      "auto_headroom": true
+      "auto_headroom": true,
+      "width": 1.0,
+      "limiter": true
     }
   },
   "presets": [
@@ -146,7 +149,9 @@
         "bass": 0.0,
         "treble": 0.0,
         "preamp": 0.0,
-        "auto_headroom": true
+        "auto_headroom": true,
+        "width": 1.0,
+        "limiter": true
       },
       "factory": true
     },
@@ -219,7 +224,9 @@
         "bass": 0.0,
         "treble": 0.0,
         "preamp": 8.0,
-        "auto_headroom": false
+        "auto_headroom": false,
+        "width": 1.0,
+        "limiter": true
       },
       "factory": true,
       "description": "Community speaker preset by GAZuOOT. Original +8 dB input boost; automatic headroom is off. Lower playback volume if it distorts."
@@ -293,7 +300,9 @@
         "bass": 0.0,
         "treble": 0.0,
         "preamp": 0.0,
-        "auto_headroom": true
+        "auto_headroom": true,
+        "width": 1.0,
+        "limiter": true
       }
     }
   ],

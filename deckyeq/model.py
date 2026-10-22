@@ -49,7 +49,7 @@ def name(value):
 
 def flat_eq():
     return {"bands": [{"frequency": float(f), "gain": 0.0, "q": float(LIMITS["flat_q"]), "type": "peaking"} for f in FREQUENCIES],
-            "bass": 0.0, "treble": 0.0, "preamp": 0.0, "auto_headroom": True}
+            "bass": 0.0, "treble": 0.0, "preamp": 0.0, "auto_headroom": True, "width": 1.0, "limiter": True}
 
 
 def go_s_eq():
@@ -64,15 +64,20 @@ def go_s_eq():
              ("highshelf", 48000, 0), ("peaking", 16000, 0)]
     return {"bands": [{"type": kind, "frequency": float(freq), "gain": float(gain), "q": 1.0}
                       for kind, freq, gain in specs],
-            "bass": 0.0, "treble": 0.0, "preamp": 8.0, "auto_headroom": False}
+            "bass": 0.0, "treble": 0.0, "preamp": 8.0, "auto_headroom": False, "width": 1.0, "limiter": True}
+
+
+EQ_KEYS = {"bands", "bass", "treble", "preamp", "auto_headroom"}
+STAGE_KEYS = {"width": 1.0, "limiter": True}  # Added in 1.1; older presets get these defaults.
 
 
 def validate_eq(value, legacy=False):
-    if not isinstance(value, dict) or set(value) != {"bands", "bass", "treble", "preamp", "auto_headroom"}:
+    if not isinstance(value, dict) or not EQ_KEYS <= set(value) <= EQ_KEYS | set(STAGE_KEYS):
         raise EQError("Unsupported EQ settings. Use a DeckyEQ preset.")
+    value = {**STAGE_KEYS, **value}
     bands = value["bands"]
-    if not isinstance(bands, list) or len(bands) != 10:
-        raise EQError("An EQ preset must contain exactly 10 bands.")
+    if not isinstance(bands, list) or len(bands) != len(FREQUENCIES):
+        raise EQError(f"An EQ preset must contain exactly {len(FREQUENCIES)} bands.")
     cleaned = []
     for i, band in enumerate(bands):
         required = {"frequency", "gain", "q"} if legacy else {"frequency", "gain", "q", "type"}
@@ -86,16 +91,19 @@ def validate_eq(value, legacy=False):
                         "q": number(band["q"], *LIMITS["q"], "Band Q")})
     if type(value["auto_headroom"]) is not bool:
         raise EQError("Automatic headroom must be on or off.")
+    if type(value["limiter"]) is not bool:
+        raise EQError("The limiter must be on or off.")
     low, high = LIMITS["preamp"]
     return {"bands": cleaned, "bass": number(value["bass"], *LIMITS["tone_gain"], "Bass"),
             "treble": number(value["treble"], *LIMITS["tone_gain"], "Treble"),
             "preamp": number(value["preamp"], low, 0 if legacy else high, "Preamp"),
-            "auto_headroom": value["auto_headroom"]}
+            "auto_headroom": value["auto_headroom"], "width": number(value["width"], *LIMITS["width"], "Stereo width"),
+            "limiter": value["limiter"]}
 
 
 def initial_state():
     return {"version": SCHEMA_VERSION, "enabled": False, "target": "", "speakers_only": True,
-            "selected": "flat", "working": flat_eq(), "presets": []}
+            "boost": 0.0, "selected": "flat", "working": flat_eq(), "presets": []}
 
 
 def validate_state(value):
@@ -110,6 +118,8 @@ def validate_state(value):
     if not isinstance(target, str) or len(target) > 512 or any(ord(c) < 32 for c in target):
         raise EQError("Invalid audio output.")
     result["target"] = target
+    # A global volume boost (1.1+), not part of any preset: the device is quiet, not the sound.
+    result["boost"] = number(value.get("boost", 0.0), *LIMITS["boost"], "Volume boost")
     result["working"] = validate_eq(value.get("working"), legacy=value["version"] == 1)
     items = value.get("presets")
     if not isinstance(items, list) or len(items) > MAX_PRESETS:
@@ -161,7 +171,7 @@ def create_preset(state, title, eq):
 
 def decode_import(text):
     if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_IMPORT_BYTES:
-        raise EQError("Preset files must be no larger than 256 KiB.")
+        raise EQError(f"Preset files must be no larger than {MAX_IMPORT_BYTES // 1024} KiB.")
     def reject_constant(_):
         raise EQError("Non-finite JSON values are not allowed.")
     def unique_keys(pairs):
@@ -193,11 +203,22 @@ def decode_import(text):
     return output
 
 
+def portable(eq):
+    """EQ as written to disk: width and limiter only when changed, so DeckyEQ 1.0 still reads it."""
+    return {k: copy.deepcopy(v) for k, v in eq.items() if k not in STAGE_KEYS or v != STAGE_KEYS[k]}
+
+
+def portable_state(state):
+    kept = {k: v for k, v in state.items() if k != "boost" or v}  # 1.0 never sees an unused boost.
+    return {**kept, "working": portable(state["working"]),
+            "presets": [{**p, "eq": portable(p["eq"])} for p in state["presets"]]}
+
+
 def export_document(state, all_presets=False):
     if all_presets:
         # A bank contains the saved library; include Flat so an empty library is portable too.
         items = state["presets"] or [selected_preset(initial_state())]
         return {"format": "deckyeq-bank", "version": SCHEMA_VERSION,
-                "presets": [{"name": p["name"], "eq": copy.deepcopy(p["eq"])} for p in items]}
+                "presets": [{"name": p["name"], "eq": portable(p["eq"])} for p in items]}
     return {"format": "deckyeq-preset", "version": SCHEMA_VERSION,
-            "preset": {"name": selected_preset(state)["name"], "eq": copy.deepcopy(state["working"])}}
+            "preset": {"name": selected_preset(state)["name"], "eq": portable(state["working"])}}

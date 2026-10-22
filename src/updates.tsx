@@ -77,7 +77,9 @@ export class UpdateController {
         this.publish({ ...this.state, download: result });
       }
     } catch (error) {
-      this.publish({ ...this.state, error: error instanceof Error ? error.message : "The update request failed. Try again." });
+      // A failed re-check must not keep offering the previous result's download.
+      this.publish({ ...this.state, check: kind === "check" ? undefined : this.state.check,
+        error: error instanceof Error ? error.message : "The update request failed. Try again." });
     } finally {
       this.publish({ ...this.state, busy: null });
     }

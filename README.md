@@ -22,13 +22,16 @@ A live equalizer, bass and treble controls, and your own presets inside Gaming M
 | **Live equalizer** | Ten adjustable bands with changes applied while audio is playing |
 | **Bass and treble** | Separate tone sliders, each adjustable from -9 to +9 dB |
 | **Advanced filters** | Choose bell, low shelf or high shelf for each band; adjust gain, frequency and width |
-| **Your own presets** | Save up to 64 user presets; update, rename, copy, delete or revert to the saved sound |
+| **Your own presets** | Save up to 64 user presets; save changes, rename, copy, delete or discard changes |
 | **Built-in presets** | Start from Flat or the community **Legion Go S · Original** preset |
 | **Import and export** | Share individual sounds or your saved preset library as portable JSON files |
 | **Saved drafts** | Keeps your latest edits when you close QAM or restart Decky |
-| **Level and headroom** | Adjust input gain and optionally compensate for frequency boosts |
+| **Volume boost** | Up to +12 dB louder than SteamOS's maximum, for every preset, kept clean by the limiter |
+| **Stereo width** | From mono to twice as wide, applied live |
+| **Limiter** | A look-ahead peak limiter keeps boosts loud by turning down only peaks that would clip |
+| **Level and headroom** | Adjust input gain and optionally compensate for large boosts |
 | **Output selection** | Apply EQ to your chosen output, with speaker-only bypass enabled by default |
-| **Normal volume control** | Sets the physical output to 100% before routing through EQ; keeps your listening volume on the virtual output |
+| **Normal volume control** | EQ sits in front of the chosen output; Steam's volume, volume buttons and output choice stay untouched |
 | **Compact QAM interface** | Native Decky sliders, dropdowns and full-width action buttons |
 | **Plugin updates** | Check GitHub for a newer release and download its integrity-checked installation ZIP to your Downloads folder |
 
@@ -44,9 +47,10 @@ A live equalizer, bass and treble controls, and your own presets inside Gaming M
 | Extra audio packages | None on the tested stock system; no EasyEffects or external effects plugins required |
 | Internet | Only for checking and downloading plugin updates |
 
-Native filter updates, preset exchange, volume transfer and routing restoration were
-verified on Legion Go 2. Listening tests, physical controller navigation and suspend/resume
-acceptance remain open. Other handhelds have not been validated. See the
+On a Legion Go 2 (SteamOS 3.10, WirePlumber 0.5.14) the smart-filter routing, live filter
+updates, untouched default output and volume, crash behaviour and idle CPU use were measured,
+and EQ was checked in Game Mode. Headphone and Bluetooth transitions, suspend/resume and
+longer listening remain open. Other handhelds have not been validated. See the
 [validation record](docs/VALIDATION.md) for the scope of testing.
 
 ---
@@ -60,26 +64,31 @@ acceptance remain open. Other handhelds have not been validated. See the
 5. Open **DeckyEQ** in the Decky menu and turn on **Enable EQ**.
 
 The package is `artifacts/DeckyEQ-<version>.zip`, containing one `DeckyEQ` folder.
-If no suitable speaker output is selected automatically, choose one in **View → Output**.
+If no suitable speaker output is selected automatically, choose one in **Output and level**.
 
 ---
 
 ## Usage
 
-| View | Controls |
+The main screen holds what you use every day: **Enable EQ**, the **Preset** list,
+**Volume boost** and the **Bass**, **Treble** and **Stereo width** sliders. Each row below it shows its current state and opens a page:
+
+| Page | Controls |
 |---|---|
-| **Equalizer** | Choose a preset, adjust Bass, Treble and band gains, or enable advanced filter editing |
-| **Presets** | Name and save sounds, manage your library, and import or export JSON files |
-| **Output** | Choose an audio output, configure headroom and input level, and reset the current controls |
+| **Equalizer bands** | The ten band sliders, **Edit one band** (filter type, frequency, width) and **Reset to flat** |
+| **Presets** | Your library, saving and naming sounds, and importing or exporting JSON files |
+| **Output and level** | The output EQ applies to, speakers-only bypass, the limiter, automatic headroom and input level |
 | **About** | Plugin version, author, license and GitHub updates |
 
-Play familiar audio, make your adjustments, then open **Presets**, enter a name and
-select **Save as new preset**. Use **Update selected preset** to save later changes
-to that entry. Built-in presets can be edited and saved as your own copies.
+Technical facts and rare actions sit under **Show details** at the bottom of a page;
+**B** goes back one page.
+Play familiar audio, make your adjustments, then open **Presets** and select
+**Save as new…**. **Save changes** stores later edits in that preset and **Discard changes**
+restores it. Built-in presets can be edited and saved as your own copies.
 
-**Export current sound** includes your latest edits. **Export saved preset library**
-includes saved user presets. Exports go to `~/Documents/DeckyEQ/` by default; you can
-also choose a folder. Import accepts DeckyEQ JSON files, including the earlier preset
+**Export this sound** includes your latest edits; **Export all presets** saves your
+saved library. Exports go to `~/Documents/DeckyEQ/`; another folder can be chosen
+under **Show details**. Import accepts DeckyEQ JSON files, including the earlier preset
 format. EasyEffects and Equalizer APO files need conversion before use.
 
 <details>
@@ -101,7 +110,7 @@ This is community tuning for Go S, not a measured Go 2 calibration. The
 
 ## Updates
 
-Open **View → About → Updates** and select **Check for Updates**. When a newer stable
+Open **About** and select **Check for Updates**. When a newer stable
 release is available, select **Download**. The plugin saves the installation ZIP to
 your Downloads folder after checking its GitHub SHA-256 digest, size, contents and version.
 
@@ -117,20 +126,27 @@ DeckyEQ processes stereo playback with PipeWire's built-in filters. Slider and f
 changes update the running graph without restarting PipeWire. It uses your existing
 audio session and runs without root privileges or extra audio packages.
 
-Before switching playback to the virtual **DeckyEQ** output, the plugin sets the physical
-output to **100%** and moves your previous volume and mute setting to DeckyEQ. Steam's
-normal volume controls then adjust that virtual output. Disabling EQ transfers the current
-volume back and restores hardware playback.
+The equalizer is a WirePlumber **smart filter** placed in front of the output you choose.
+WirePlumber sends whatever plays to that output through it, so DeckyEQ never changes the
+default output, moves streams or touches volumes. Steam's volume slider and the volume
+buttons keep working as usual, and when Steam plays to another output (for example
+Bluetooth headphones), EQ simply waits. If the filter stops for any reason, playback
+continues on the output directly at your volume. Requires WirePlumber 0.5 or newer
+(SteamOS 3.7+).
 
-**Speaker port only** bypasses EQ when the selected device switches away from its speaker
-port. Turn it off to apply EQ to a selected headset or HDMI output. A manual output change
-in Steam is respected: selecting the physical speaker directly bypasses EQ and returns
-your volume to it, instead of playing at the 100% hardware level. Use **Refresh** in
-**Output** to resume. Disabling or unloading the plugin stops its audio processing and
-keeps your preset library.
+**Speakers only** bypasses EQ when the selected device switches away from its speaker
+port. Turn it off to apply EQ to a selected headset or HDMI output. Disabling or unloading
+the plugin stops its audio processing and keeps your preset library.
 
-Automatic headroom can make boosted presets quieter by reserving room for their peaks.
-It is not a limiter. DeckyEQ provides sound tuning; it does not reproduce Windows/Nahimic
+The **Limiter** (on by default) lets boosts stay loud: it catches peaks that would
+clip, a millisecond and a half before they reach the speakers; unboosted audio passes untouched. Automatic headroom then
+only lowers the input for EQ boosts above +6 dB, which the limiter alone would squash, and
+keeps a raised **Input level**; with the limiter off it makes room for every boost,
+including the input level, so boosted presets get quieter. **Volume boost** raises
+everything after the filters, for all presets, and keeps the limiter running while it is up:
+use it when the speakers are too quiet at full volume. Neither
+protects speakers from physical overload at high volume. DeckyEQ provides sound tuning;
+it does not reproduce Windows/Nahimic
 processing or claim to fix a confirmed Go 2 driver defect.
 
 See the [usage and implementation guide](docs/USAGE.md) for filter ranges, preset formats,
@@ -145,8 +161,9 @@ headroom calculations and output recovery details.
 
 <br>
 
-Read the reason shown in the plugin. Confirm the intended device under **View → Output**,
-then use **Refresh / reconnect EQ**. With **Speaker port only** enabled, an active
+Read the reason shown in the plugin. Confirm the intended device under **Output and level**,
+then use **Reconnect EQ** (shown when something is wrong, and under **Show details**).
+With **Speakers only** enabled, an active
 headphone port or an unknown port causes bypass. A missing system tool is reported
 in the interface.
 
@@ -157,9 +174,10 @@ in the interface.
 
 <br>
 
-Automatic headroom lowers the input level to make room for boosts. Large or overlapping
-boosts may need substantial compensation. If you hear distortion with headroom off,
-reduce **Input level** or enable **Automatic headroom** in **View → Output**.
+With the **Limiter** off, automatic headroom lowers the input level by the full boost,
+so boosting bass or treble mostly makes everything else quieter. Keep the limiter on.
+If you hear distortion with both off, reduce **Input level** or enable them in
+**Output and level**.
 The built-in Go S preset intentionally retains the original gain settings.
 
 </details>
@@ -169,8 +187,8 @@ The built-in Go S preset intentionally retains the original gain settings.
 
 <br>
 
-Library export contains saved presets. Save or update the preset first, or use
-**Export current sound** to export the current draft directly. Importing a file adds
+**Export all presets** contains saved presets. Save the preset first, or use
+**Export this sound** to export the current draft directly. Importing a file adds
 presets without overwriting existing entries or changing playback automatically.
 
 </details>
@@ -205,8 +223,10 @@ npm run build      # compile the frontend
 npm run package    # package the current build
 ```
 
-`npm run check` runs all validation and packaging steps. The archive includes frontend
-source, build inputs and dependency notices, with a SHA-256 sidecar in `artifacts/`.
+`npm run check` runs all validation and packaging steps, starting with the native audio
+stage (`native/deckyeq_dsp.c` → `bin/deckyeq_dsp.so`, compiled with gcc; on Windows through
+WSL). The archive includes frontend and C source, build inputs and dependency notices, with a
+SHA-256 sidecar in `artifacts/`.
 Linux-specific filesystem checks skip on Windows. Tests use a simulated audio backend;
 native acceptance is recorded separately in [VALIDATION.md](docs/VALIDATION.md).
 

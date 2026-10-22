@@ -134,6 +134,16 @@
         },
         "auto_headroom": {
           "type": "boolean"
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Stereo width: 0 is mono, 1 unchanged, 2 twice the side signal. Optional, default 1."
+        },
+        "limiter": {
+          "type": "boolean",
+          "description": "Look-ahead peak limiter. Optional, default true."
         }
       }
     }

@@ -9,26 +9,79 @@ not published releases. The public build includes the later audio and dropdown
 fixes. Its GitHub preparation and updater checks run locally; that prepared
 archive has not been installed on the device.
 
-## 1.1.0 (unreleased, not yet validated on a device)
+## 1.1.0 (unreleased)
 
 The public update is numbered 1.1.0. The test device still runs the internal
 build 1.1.1, which the in-plugin updater treats as newer, so install 1.1.0 there
 from the ZIP (Decky → Developer → Install Plugin from ZIP).
 
-- `npm run check` passes: 138 Python tests (16 POSIX-only tests skip on
-  Windows; all 138 pass on Linux, including the PipeWire supervisor with real
-  processes), 41 UI tests including backend-generated contract and parity
-  fixtures, the production build and packaging.
-- Covered by tests with protocol fakes, not by hardware: per-device and per-port
-  volume restores across headphone plugs and Bluetooth reconnects, restore of
-  the user's volume when Decky dies, bypass when the physical output is chosen
-  in Steam, event-driven monitoring with polling fallback, no takeover of
-  Bluetooth playback on enable, the +24 dB manual boost cap, stable filter
-  frequency ranges, settings recovery from malformed values, and a frontend
-  contract fixture generated from the real backend snapshot.
-- Hardware acceptance on the Legion Go is still required before release:
-  headphone plug/unplug, Bluetooth reconnect, killing Decky during playback,
-  suspend/resume, PipeWire restart and CPU use with EQ on.
+- `npm run check` (type checking, Python and UI tests, production build and
+  packaging) passes locally and in CI; POSIX-only tests are skipped on Windows
+  and run on Linux. Test counts are left to the CI log rather than this record.
+- Covered by tests with protocol fakes: the smart-filter configuration, start and
+  stop without any change to outputs, streams or volumes, a clear error when
+  WirePlumber does not insert the filter, readback and rollback after failed or
+  interrupted writes, suspended-filter writes, ramped level changes, the
+  combined-response headroom (checked against a dense brute-force scan and
+  replayed by the frontend), the +15 dB manual cap, settings recovery, deferred
+  draft saving, and DeckyEQ 1.0 journal recovery that never blocks EQ.
+- The panel was rebuilt as a main screen (EQ switch, preset, bass, treble) with
+  rows opening Equalizer bands, Presets, Output and level, and About. UI tests
+  cover navigation, B to go back and focus hand-off, the name dialog (refused
+  names reopen it), toasts that do not repeat on remount, preset actions, band
+  editing and selections made while QAM is hidden; the browser preview was
+  inspected at the 300 px panel width. Gamepad navigation on the device is
+  still to be checked, in particular that B stays inside the plugin.
+- Stereo width and the look-ahead limiter (native LADSPA stage), measured on
+  the Legion Go 2 through the real stereo graph as a smart filter into a float
+  null sink with a -1 dBFS test ceiling (the shipped ceiling is 0 dBFS): a
+  -1 dBFS 70 Hz tone with +9 dB bass reached +6.93 dBFS without the limiter and
+  exactly -1.00 dBFS with it, also when switched on live; THD of a
+  boosted 70 Hz tone 0.37–0.63% (the CAPS compressor shipped with SteamOS measured
+  8–58%, so it was rejected). Width 0 produced identical channels, width 2 the
+  computed -2.50 / -12.04 dBFS for a one-sided tone. All 198 controls read back
+  and confirmed. CPU while playing: 2.1% of one core (1.8% before the stage);
+  the volume boost (stage gain before the limiter) is covered by the DSP tests;
+  idle remains 0% because the filter suspends with its output.
+- Checked on the device (below): routing, DSP level, untouched session, crash
+  behaviour, CPU (0% idle, 1.8% of one core while playing) and the Game Mode
+  basics. Still open: headphone and Bluetooth transitions, suspend/resume and a
+  PipeWire restart.
+
+## Smart filter checks on the Legion Go 2 (2026-10-22)
+
+SteamOS 3.10, PipeWire 1.6.8, WirePlumber 0.5.14. Run over SSH as the desktop user,
+with the backend started directly (Decky installation of this build still pending).
+
+- Routing, with temporary null sinks as targets: a stream pinned to the target and a
+  stream following the default both pass the filter; a stream on another default
+  output does not; switching the default to the target while playing moves the
+  stream through the filter; `filter.smart.disabled` in the `filters` metadata
+  bypasses and restores it live; killing the filter relinks the stream straight
+  to the target. WirePlumber never selected the filter as the default output.
+- DSP: a 1 kHz tone measured at the target's monitor rises by exactly 12.0 dB for a
+  +12 dB bell, identical to the plain filter-chain. An auto-connected recorder aimed
+  at the target is itself redirected to the filter input, so it measures pre-EQ audio.
+- Real speaker (muted during the test): enable 0.22 s, slider edits with readback
+  0.12-0.13 s; default output, volume, mute and active port unchanged after enable
+  and after disable. Killing the backend left no filter node or process behind.
+- `node.always-process` cost about 2.8% of one core while nothing played. Without
+  it a suspended filter reports stale controls (written 6 dB, read 0 dB) but keeps
+  the writes: a +12 dB bell written while suspended measured exactly +12 dB once
+  audio flowed. The flag was removed; edits to a suspended filter are written
+  without readback and verified by the monitor once it runs. Idle cost is now 0%,
+  edits take 36-71 ms.
+- Steam lists a virtual sink by its node name, so the filter's sink is named
+  `DeckyEQ`. A sink with media class `Audio/Sink/Internal` would be hidden from
+  Steam, but WirePlumber then no longer routes playback through the smart filter.
+- SteamOS ships CAPS 0.9.26 LADSPA plugins (`/usr/lib/ladspa/caps.so`, including a
+  compressor/limiter) that filter-chain can load; noted for a possible limiter mode.
+
+Installed through Decky (`DeckyEQ 1.1.0 loaded ... audio=active`, also after a
+reboot) and checked by the user in Game Mode: the panel loads, enabling EQ shows
+**Live equalizer**, Steam's output list shows **DeckyEQ** next to the speaker,
+bass and treble changes are audible, the auto-headroom note appears, and the
+volume buttons behave normally. Previous plugin kept as a backup on the device.
 
 ## Public 1.0.0 local preparation
 
@@ -173,10 +226,11 @@ headphone transitions, power use and suspend/resume remain to be checked:
    transition clicks, latency and CPU use without assuming Windows parity.
 7. Close/reopen QAM, restart Decky, suspend/resume and restart PipeWire. Confirm
    truthful status and recovery of the most recent draft and selected preset.
-8. Insert/remove wired headphones and switch Bluetooth/HDMI outputs. Confirm
-   the intended bypass/restore behavior, including the polling transition interval.
-9. Disable/unload/uninstall while a game is playing. Verify real audio returns,
-   the current virtual volume is transferred back and no DeckyEQ child or virtual
-   sink remains. Check failed activation and restoration from the volume journal.
+8. Insert/remove wired headphones and switch Bluetooth/HDMI outputs. Confirm the
+   speaker-only bypass, Standby when Steam plays elsewhere, and that headphones
+   never receive speaker EQ for more than a moment.
+9. Disable/unload/uninstall and kill Decky while a game is playing. Verify audio
+   continues on the output at the same volume, the default output is unchanged
+   and no DeckyEQ process or sink remains.
 
 Treat any failed check as a defect to resolve before publishing a verified release.

@@ -17,9 +17,13 @@ def random_eq(rng):
     eq = flat_eq()
     value = lambda span: round(rng.uniform(*span), 2)
     for band in eq["bands"]:
-        band.update(type=rng.choice(FILTER_TYPES), gain=value(LIMITS["band_gain"]), q=value(LIMITS["q"]))
+        # Any valid frequency, including the clamped 0 Hz / >= Nyquist values the Go S preset uses.
+        frequency = rng.choice([value(LIMITS["stable_frequency"]), rng.choice([0, 24000, 40000, 48000])])
+        band.update(type=rng.choice(FILTER_TYPES), gain=value(LIMITS["band_gain"]), q=value(LIMITS["q"]),
+                    frequency=float(frequency))
     eq.update(bass=value(LIMITS["tone_gain"]), treble=value(LIMITS["tone_gain"]),
-              preamp=value(LIMITS["preamp"]), auto_headroom=rng.random() < 0.5)
+              preamp=value(LIMITS["preamp"]), auto_headroom=rng.random() < 0.5,
+              width=rng.choice([1.0, value(LIMITS["width"])]), limiter=rng.random() < 0.5)
     return eq
 
 
@@ -27,7 +31,8 @@ def vectors():
     rng = random.Random(7)
     eqs = [random_eq(rng) for _ in range(60)]
     hz = [0, 0.5, 6, 19.99, 20, 31.25, 1000, 19999, 20000, 20000.5, 23999, 24000, 40000, 48000]
-    return {"headroom": [{"eq": eq, "expected": headroom(eq)} for eq in eqs],
+    boosts = [rng.choice([0.0, 0.0, 6.0]) for _ in eqs]
+    return {"headroom": [{"eq": eq, "boost": b, "expected": headroom(eq, b)} for eq, b in zip(eqs, boosts)],
             "frequency": [{"hz": value, "expected": frequency(value)} for value in hz],
             "flat": flat_eq()}
 

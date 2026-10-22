@@ -1,4 +1,4 @@
-import { callable, definePlugin, FileSelectionType, openFilePicker, useQuickAccessVisible } from "@decky/api";
+import { callable, definePlugin, FileSelectionType, openFilePicker, toaster, useQuickAccessVisible } from "@decky/api";
 import { staticClasses } from "@decky/ui";
 import { App, EqualizerIcon, FileUI } from "./App";
 import { Controller } from "./controller";
@@ -17,10 +17,12 @@ const files: FileUI = {
   exportFolder: home => picked(openFilePicker(FileSelectionType.FOLDER, home, false, true)),
 };
 
+const toast = (body: string) => toaster.toast({ title: "DeckyEQ", body });
+
 export default definePlugin(() => {
   const controller = new Controller({ status, perform });
   const updates = new UpdateController({ check: checkUpdates, download: downloadUpdate });
-  const Content = () => <App controller={controller} files={files} updates={updates} visible={useQuickAccessVisible()} />;
+  const Content = () => <App controller={controller} files={files} updates={updates} toast={toast} visible={useQuickAccessVisible()} />;
   return { name: "DeckyEQ", titleView: <div className={staticClasses.Title}>DeckyEQ</div>,
     // Steam's native dropdown menu temporarily hides QAM. Preserve the mounted
     // view and its selection callbacks; App gates only polling on visibility.

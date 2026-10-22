@@ -20,6 +20,7 @@ vi.mock("@decky/api", () => ({
   useQuickAccessVisible: () => decky.visible,
   FileSelectionType: { FILE: 0, FOLDER: 1 },
   openFilePicker: vi.fn(),
+  toaster: { toast: vi.fn() },
 }));
 vi.mock("@decky/ui", async () => {
   const native = await import("../preview/decky-ui");
@@ -58,30 +59,29 @@ async function setup() {
   // Clone triggers the visibility-hook update without replacing the component.
   function Host() { return decky.visible || plugin.alwaysRender ? cloneElement(plugin.content) : null; }
   const rendered = render(<Host />);
-  await screen.findByRole("combobox", { name: "View" });
+  await screen.findByRole("combobox", { name: "Preset" });
   const visibility = (value: boolean) => { decky.visible = value; rendered.rerender(<Host />); };
   return { visibility, plugin };
 }
 
-it("retains View selections delivered while a native dropdown hides QAM", async () => {
+const open = (title: string) => fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${title}`) }));
+
+it("keeps the open page while QAM hides and shows again", async () => {
   const { visibility } = await setup();
-  for (const [view, content] of [["presets", "Your library"], ["output", "Audio output"], ["about", "About DeckyEQ"], ["eq", "Tone"]]) {
-    const select = decky.selections.get("View")!;
-    visibility(false);
-    act(() => select({ data: view }));
-    visibility(true);
-    expect((screen.getByRole("combobox", { name: "View" }) as HTMLSelectElement).value).toBe(view);
-    expect(screen.getByRole("heading", { name: content })).toBeTruthy();
-  }
+  open("Output and level");
+  visibility(false);
+  visibility(true);
+  expect(screen.getByRole("heading", { name: "Output and level" })).toBeTruthy();
   expect(decky.perform).not.toHaveBeenCalled();
   expect(decky.checkUpdates).not.toHaveBeenCalled();
 });
 
 it("keeps updates in About and retains a requested result while QAM is hidden", async () => {
   const { visibility, plugin } = await setup();
-  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "output" } });
+  open("Output and level");
   expect(screen.queryByRole("button", { name: "Check for Updates" })).toBeNull();
-  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "about" } });
+  fireEvent.click(screen.getByRole("button", { name: "‹ DeckyEQ" }));
+  open("About");
   expect(screen.getByText(/BSD 3-Clause/)).toBeTruthy();
   let resolve!: (value: unknown) => void;
   decky.checkUpdates.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
@@ -98,7 +98,8 @@ it("keeps updates in About and retains a requested result while QAM is hidden", 
 
 it("keeps advanced band selection and applies filter choices while QAM is hidden", async () => {
   const { visibility } = await setup();
-  fireEvent.click(screen.getByRole("switch", { name: "Edit filter type, frequency & width" }));
+  open("Equalizer bands");
+  fireEvent.click(screen.getByRole("button", { name: /^Edit one band/ }));
   const selectBand = decky.selections.get("Band")!;
   visibility(false);
   act(() => selectBand({ data: 5 }));
@@ -114,7 +115,7 @@ it("keeps advanced band selection and applies filter choices while QAM is hidden
 
 it("pauses hidden polling but accepts an explicit preset selection", async () => {
   const { visibility } = await setup();
-  const selectPreset = decky.selections.get("Current preset")!;
+  const selectPreset = decky.selections.get("Preset")!;
   vi.useFakeTimers();
   visibility(false);
   const reads = decky.status.mock.calls.length;
@@ -124,16 +125,16 @@ it("pauses hidden polling but accepts an explicit preset selection", async () =>
   expect(engine.value.state.selected).toBe("go-s-original");
   visibility(true);
   await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-  expect((screen.getByRole("combobox", { name: "Current preset" }) as HTMLSelectElement).value).toBe("go-s-original");
+  expect((screen.getByRole("combobox", { name: "Preset" }) as HTMLSelectElement).value).toBe("go-s-original");
 });
 
 it("treats a closed file picker as a cancel, not an error", async () => {
   vi.mocked(openFilePicker).mockRejectedValueOnce("User canceled");
   await setup();
-  fireEvent.change(screen.getByRole("combobox", { name: "View" }), { target: { value: "presets" } });
-  fireEvent.click(screen.getByRole("button", { name: "Import preset or bank…" }));
+  open("Presets");
+  fireEvent.click(screen.getByRole("button", { name: "Import preset…" }));
   await waitFor(() => expect(openFilePicker).toHaveBeenCalled());
-  await waitFor(() => expect((screen.getByRole("button", { name: "Import preset or bank…" }) as HTMLButtonElement).disabled).toBe(false));
+  await waitFor(() => expect((screen.getByRole("button", { name: "Import preset…" }) as HTMLButtonElement).disabled).toBe(false));
   expect(screen.queryByRole("alert")).toBeNull();
   expect(decky.perform.mock.calls.some(call => call[0] === "import")).toBe(false);
 });

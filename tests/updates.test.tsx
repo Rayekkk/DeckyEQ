@@ -121,3 +121,13 @@ it("removes a stale download notice when the public release changes", async () =
   expect(screen.queryByText(/Version .* downloaded/)).toBeNull();
   expect(screen.getByRole("button", { name: "Download 1.0.2" })).toBeTruthy();
 });
+
+it("drops an old offer when a later check fails", async () => {
+  const client = { check: vi.fn().mockResolvedValueOnce(available).mockRejectedValueOnce(new Error("rate limit")), download: vi.fn() };
+  setup(client);
+  await click("Check for Updates");
+  expect(screen.getByRole("button", { name: "Download 1.0.1" })).toBeTruthy();
+  await click("Check for Updates");
+  expect(screen.getByRole("alert").textContent).toBe("rate limit");
+  expect(screen.queryByRole("button", { name: /Download/ })).toBeNull();
+});
