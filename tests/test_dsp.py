@@ -2,6 +2,7 @@
 import ctypes
 import json
 import math
+import operator
 import random
 import sys
 import unittest
@@ -93,6 +94,27 @@ def thd(signal, freq):
     return math.sqrt(sum(power(freq * k) for k in range(2, 6)) / power(freq))
 
 
+def lanczos(x, a):
+    return 1.0 if abs(x) < 1e-12 else 0.0 if abs(x) >= a else a * math.sin(math.pi * x) * math.sin(math.pi * x / a) / (math.pi * x) ** 2
+
+
+# 64 taps (Lanczos, a = 32) for every eighth of the way between two samples: shorter kernels miss
+# most of the peaks of bright material, whose energy sits near Nyquist.
+INTERPOLATE = [[lanczos(f / 8 - k, 32) for k in range(-31, 33)] for f in range(1, 8)]
+
+
+def between(signal):
+    """The magnitudes a DAC reconstructs between samples, every eighth of the way."""
+    for n in range(31, len(signal) - 32):
+        window = signal[n - 31:n + 33]
+        for weights in INTERPOLATE:
+            yield abs(sum(map(operator.mul, weights, window)))
+
+
+def true_peak_db(signal):
+    return 20 * math.log10(max(max(map(abs, signal)), max(between(signal))))
+
+
 @unittest.skipUnless(sys.platform == "linux", "The audio stage is a Linux shared library.")
 class StageTests(unittest.TestCase):
     def setUp(self):
@@ -121,7 +143,6 @@ class StageTests(unittest.TestCase):
         self.assertAlmostEqual(rms_db(out_r[2000:]), rms_db(right[2000:]), delta=0.05)
         tone = sine(1000, 0.5, 0.3)
         out_l, _ = stage.process(tone, tone)
-        whole = 1000 * 10  # Ten whole cycles of the delayed tone.
         self.assertAlmostEqual(tone_level(out_l[4800:4800 + 480], 1000), 0.5, places=3)
         self.assertEqual(stage.controls[REDUCTION].value, 0.0)
 
@@ -152,7 +173,7 @@ class StageTests(unittest.TestCase):
             self.assertGreater(max(map(abs, steady)), 10 ** (-4.5 / 20))  # Loud, not squashed.
 
     def test_a_muted_start_is_silent_from_the_first_frame(self):
-        # The runtime starts the stage at -96 dB and fades it in: no full-level blip first.
+        # A host that starts the stage muted (as DeckyEQ 1.0 did) gets no full-level blip first.
         stage = self.stage(level=-96.0)
         out_l, _ = stage.process([0.9] * 256, [0.9] * 256)
         self.assertLess(max(map(abs, out_l)), 1e-4)
@@ -162,7 +183,7 @@ class StageTests(unittest.TestCase):
         tone = sine(1000, 0.5, 0.2)
         out_l, _ = stage.process(tone, tone)
         self.assertAlmostEqual(max(map(abs, out_l[RATE // 10:])), 0.5 * 10 ** (-6 / 20), places=3)
-        stage.controls[LEVEL].value = -96.0  # What stop() sends before ending the filter.
+        stage.controls[LEVEL].value = -96.0  # Muting fades, it does not cut.
         out_l, _ = stage.process(tone, tone)
         steps = [abs(b - a) for a, b in zip(out_l, out_l[1:])]
         self.assertLess(max(steps), 0.2)  # A fade, not a cut.
@@ -266,13 +287,55 @@ class StageTests(unittest.TestCase):
         stage = self.stage(ceiling=-1.0)
         tone = [1.6 * math.sin(math.pi / 2 * n + math.pi / 4) for n in range(9600)]
         out_l, _ = stage.process(tone, tone)
-        steady = out_l[4800:6800]
-        def lanczos(x):
-            return 1.0 if abs(x) < 1e-12 else 0.0 if abs(x) >= 8 else 8 * math.sin(math.pi * x) * math.sin(math.pi * x / 8) / (math.pi * x) ** 2
-        true_peak = max(abs(sum(steady[k] * lanczos(n + f - k) for k in range(max(0, n - 8), min(len(steady), n + 9))))
-                        for n in range(16, len(steady) - 16) for f in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875))
-        self.assertLess(20 * math.log10(true_peak), -1.0 + 0.3)  # Within the detector's interpolation error.
-        self.assertGreater(20 * math.log10(true_peak), -2.0)  # Limited, not squashed.
+        true_peak = true_peak_db(out_l[4800:6800])
+        self.assertLess(true_peak, -1.0 + 0.3)  # Within the detector's interpolation error.
+        self.assertGreater(true_peak, -2.0)  # Limited, not squashed.
+
+    def test_the_right_channel_alone_is_limited_by_both_detectors(self):
+        # Each detector must watch the right channel too. A bass note is held 3 dB below the ceiling;
+        # a quarter-sample-rate tone at 22.5 or 67.5 degrees peaks 1/4 or 3/4 of the way between samples.
+        stage = self.stage()
+        _, out_r = stage.process([0.0] * RATE, sine(40, 2.0))
+        self.assertLess(max(map(abs, out_r[RATE // 2:])), 10 ** (-3 / 20))
+        for phase in (math.pi / 8, 3 * math.pi / 8):
+            stage = self.stage()
+            tone = [1.6 * math.sin(math.pi / 2 * n + phase) for n in range(9600)]
+            out_l, out_r = stage.process([0.0] * 9600, tone)
+            self.assertLess(true_peak_db(out_r[4800:6800]), -1.0 + 0.3, phase)
+            self.assertEqual(max(map(abs, out_l)), 0.0)
+
+    def test_bright_clipped_noise_boosted_12_db_keeps_its_peaks_between_samples_bounded(self):
+        # 8 taps only approximate peaks between samples: this pins how far they go today, so a detector
+        # that sees less fails. Regression bounds over measured values, not targets.
+        rng = random.Random(6)
+        def bright(n=24000):
+            out, last = [], 0.0
+            for _ in range(n):  # Clipped first differences of loud noise: most energy near Nyquist.
+                now = 3 * rng.gauss(0.0, 1.0)
+                out.append(max(-1.0, min(1.0, now - last)))
+                last = now
+            return out
+        stage = self.stage(gain=12.0)
+        out_l, out_r = stage.process(bright(), bright())
+        points = [x for out in (out_l[4800:], out_r[4800:]) for x in between(out)]
+        self.assertLess(20 * math.log10(max(points)), 2.5)  # Measured +2.0 dBTP.
+        self.assertLess(sum(x > 1.0 for x in points), 1000)  # Over 0 dBFS, 1 dB over the ceiling: measured 843.
+
+    def test_the_stage_itself_caps_the_boost_at_12_db(self):
+        stage = self.stage(gain=24.0, ceiling=0.0)
+        tone = sine(1000, 0.05, 0.2)
+        out_l, _ = stage.process(tone, tone)
+        self.assertAlmostEqual(max(map(abs, out_l[RATE // 10:])), 0.05 * 10 ** (12 / 20), places=3)
+
+    def test_with_both_limiters_idle_the_stage_is_flat_and_delayed_by_its_latency(self):
+        # The two bands must add up exactly: one delayed or filtered differently leaves a dip near 150 Hz.
+        stage = self.stage()
+        impulse = [0.5] + [0.0] * 8191
+        for out in stage.process(impulse, impulse):
+            self.assertEqual(max(range(len(out)), key=lambda n: abs(out[n])), int(stage.controls[LATENCY].value))
+            for freq in (20, 50, 100, 150, 180, 250, 500, 1000, 3000, 10000, 20000):
+                response = tone_level(out, freq) * len(out) / (2 * 0.5)  # The DFT of the impulse response.
+                self.assertAlmostEqual(20 * math.log10(response), 0.0, delta=0.01, msg=freq)
 
     def test_a_loud_bass_note_does_not_turn_down_the_rest(self):
         # The reported problem: every bass hit ducked voices by up to 7.8 dB with one limiter.
@@ -299,6 +362,59 @@ class StageTests(unittest.TestCase):
         out_l, _ = stage.process(quiet, quiet)
         self.assertAlmostEqual(tone_level(out_l[RATE // 4:RATE // 4 + 480], 1000), 0.3, places=4)
         self.assertEqual(stage.controls[REDUCTION].value, 0.0)
+
+    def test_silence_after_loud_bass_has_no_subnormals_in_large_blocks(self):
+        # A fading filter state must not reach the output as subnormal floats, slow on x86.
+        stage = self.stage()
+        tone = sine(60, 1.0) + [0.0] * (2 * RATE)
+        out_l, out_r = stage.process(tone, tone, block=8192)
+        self.assertFalse([x for x in out_l + out_r if 0.0 < abs(x) < 1.1754943508222875e-38])  # FLT_MIN
+
+    def test_non_finite_controls_while_running_fall_back_safely(self):
+        rng = random.Random(4)
+        loud = [rng.uniform(-4, 4) for _ in range(4800)]
+        for bad in (math.nan, math.inf, -math.inf):
+            stage = self.stage(gain=6.0)
+            stage.process(loud, loud)
+            for port in (CEILING, RELEASE, LEVEL, GAIN):
+                stage.controls[port].value = bad
+            out_l, out_r = stage.process(loud, loud[::-1])
+            self.assertTrue(all(math.isfinite(x) for x in out_l + out_r), bad)
+            self.assertLessEqual(max(map(abs, out_l + out_r)), 10 ** (-1 / 20) + 1e-6, bad)  # The -1 dB default.
+
+    def test_latency_is_reported_at_activation(self):
+        # PipeWire reads the latency port right after activate(), before the first run().
+        for rate in (44100, 48000, 96000):
+            self.assertEqual(int(self.stage(rate=rate).controls[LATENCY].value), latency(rate))
+
+    def test_activate_again_starts_from_a_clean_state(self):
+        rng = random.Random(5)
+        quiet = [rng.uniform(-0.3, 0.3) for _ in range(4800)]
+        used = self.stage()
+        crest = sine(1000, 4.0, 0.4)[:14400 + 12]  # Stops at a crest of a loud treble tone: the true-peak history is full.
+        used.process(crest, crest)
+        used.d.activate(used.handle)
+        # A max-abs-difference, not assertEqual: a failing diff of two long lists takes minutes.
+        for again, fresh in zip(used.process(quiet, quiet), self.stage().process(quiet, quiet)):
+            self.assertEqual(max(abs(a - b) for a, b in zip(again, fresh)), 0.0)
+
+    def test_an_absurd_finite_sample_is_dropped_instead_of_muting_the_limiter(self):
+        # Unguarded, one 2e4 sample would pull the gain down by 86 dB and let it recover over about half a second.
+        stage = self.stage()
+        tone = sine(1000, 0.3, 0.5)
+        tone[2400] = 2e4
+        stage.process(tone[:9600], tone[:9600])
+        out_l, _ = stage.process(tone[9600:10080], tone[9600:10080])  # 0.15 s later the tone is at full level.
+        self.assertAlmostEqual(tone_level(out_l, 1000), 0.3, places=3)
+        self.assertEqual(stage.controls[REDUCTION].value, 0.0)
+
+    def test_the_limiter_not_the_final_clamp_holds_a_loud_tone(self):
+        # Clamping a +12 dBFS tone at the ceiling would square it off (tens of percent THD).
+        stage = self.stage()
+        out_l, _ = stage.process(sine(1000, 4.0), sine(1000, 4.0))
+        steady = out_l[RATE // 2:RATE // 2 + 960]
+        self.assertLess(thd(steady, 1000), 0.001)
+        self.assertGreater(max(map(abs, steady)), 10 ** (-1.5 / 20))  # Loud, not squashed.
 
 
 if __name__ == "__main__":

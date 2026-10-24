@@ -1,9 +1,12 @@
 """Deterministic source-inclusive Decky archive. Never deploys or connects to devices."""
 import hashlib
 import json
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+import build_native
 
 ROOT = Path(__file__).resolve().parent.parent
 DECKY_API_VERSION = "1.1.3"  # Bundled under THIRD_PARTY_SOURCES; NOTICE names this version.
@@ -32,12 +35,37 @@ def checked_version():
     return version
 
 
+def listed_sources(*options):
+    try:
+        listed = subprocess.run(["git", "ls-files", "-z", *options, "--", *SOURCE_DIRECTORIES], cwd=ROOT, check=True,
+                                capture_output=True).stdout.decode("utf-8").split("\0")
+    except (OSError, subprocess.CalledProcessError) as exc:  # No git, or no checkout (an unpacked source ZIP).
+        raise ValueError("package.py lists the sources with git: run it in a git checkout.") from exc
+    return [name for name in sorted(listed) if Path(name).suffix in SOURCE_SUFFIXES]
+
+
+def source_files():
+    # Tracked files only, as they are in the working tree: never a private, untracked note.
+    return [(ROOT / name, "DeckyEQ/" + name) for name in listed_sources()]
+
+
+def check_untracked():
+    # A new module nobody has `git add`ed yet would be silently missing from the package.
+    # A private Markdown note may stay untracked: it is left out and changes nothing at runtime.
+    untracked = [name for name in listed_sources("--others", "--exclude-standard") if not name.endswith(".md")]
+    if untracked:
+        raise ValueError("Untracked source files would be left out of the package; git add or remove them: "
+                         + ", ".join(untracked))
+    # A tracked module deleted from the working tree would be missing too, and the plugin would fail to load.
+    deleted = listed_sources("--deleted")
+    if deleted:
+        raise ValueError("Tracked source files are missing from the working tree; git rm them or restore them: "
+                         + ", ".join(deleted))
+
+
 def collect_files():
-    files = [(ROOT / name, "DeckyEQ/" + name) for name in REQUIRED]
-    for directory in SOURCE_DIRECTORIES:
-        for path in sorted((ROOT / directory).rglob("*")):
-            if path.is_file() and path.suffix in SOURCE_SUFFIXES:
-                files.append((path, "DeckyEQ/" + path.relative_to(ROOT).as_posix()))
+    check_untracked()
+    files = [(ROOT / name, "DeckyEQ/" + name) for name in REQUIRED] + source_files()
     api = ROOT / "node_modules" / "@decky" / "api"
     if json.loads((api / "package.json").read_text())["version"] != DECKY_API_VERSION:
         raise ValueError("Update NOTICE before changing the bundled Decky API version.")
@@ -51,10 +79,17 @@ def collect_files():
     return files
 
 
-def check_bundle():
+def check_native():
     stage = (ROOT / "bin/deckyeq_dsp.so").read_bytes()
     if stage[:4] != b"\x7fELF" or stage[4] != 2 or stage[18:20] != b"\x3e\x00":
         raise ValueError("bin/deckyeq_dsp.so is not an x86-64 Linux library; run scripts/build_native.py.")
+    built = ROOT / build_native.STAMP
+    if not built.is_file() or built.read_text(encoding="ascii") != build_native.stamp(ROOT):
+        raise ValueError("bin/deckyeq_dsp.so was not built from the current native/deckyeq_dsp.c; "
+                         "run scripts/build_native.py.")
+
+
+def check_bundle():
     bundle = (ROOT / "dist/index.js").read_text(encoding="utf-8")
     if any(marker in bundle for marker in PREVIEW_MARKERS):
         raise ValueError("Development preview leaked into the production bundle.")
@@ -67,6 +102,7 @@ def write_archive(output, files):
         for path, name in sorted(files, key=lambda item: item[1]):
             info = zipfile.ZipInfo(name, FIXED_TIMESTAMP)
             info.external_attr = 0o100644 << 16
+            info.create_system = 3  # Unix, as on Linux: Windows would write 0, other bytes and no file modes.
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, path.read_bytes())
 
@@ -88,6 +124,7 @@ def verify_archive(output):
 def package():
     version = checked_version()
     files = collect_files()
+    check_native()
     check_bundle()
     output = ROOT / "artifacts" / f"DeckyEQ-{version}.zip"
     output.parent.mkdir(exist_ok=True)
@@ -104,6 +141,6 @@ def package():
 if __name__ == "__main__":
     try:
         package()
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
         print(f"Package failed: {exc}", file=sys.stderr)
         sys.exit(1)

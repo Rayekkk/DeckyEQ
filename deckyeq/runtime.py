@@ -15,13 +15,14 @@ import re
 import shutil
 import signal
 import stat
+import subprocess
 import time
 import uuid
 from pathlib import Path
 
-from .graph import (LEGACY_SINK_NAME, LEVEL, PLAYBACK_NAME, SINK_NAME, STAGE_LIBRARY, controls, control_payload,
+from .graph import (LEGACY_SINK_NAME, LEVEL, MUTED, PLAYBACK_NAME, SINK_NAME, STAGE_LIBRARY, controls, control_payload,
                     filter_config, neutral, read_controls, same_controls)
-from .model import EQError, NodeGone, ToolError, flat_eq, frequency
+from .model import EQError, NodeGone, OutputGone, ToolError, flat_eq
 from .storage import atomic_json, read_json, safe_directory
 
 TOOLS = ("pipewire", "pw-cli", "pw-dump", "pactl", "python3")
@@ -29,15 +30,13 @@ UNITY_VOLUME = 65536  # PulseAudio's native 100% volume, independent of locale.
 POLL_SECONDS = 1.5  # Fallback monitor interval when pactl subscribe is unavailable.
 EVENT_QUIET = 0.15  # One output switch emits a burst of events; act once it settles,
 EVENT_DRAIN_SECONDS = 1.0  # or after this long at most, however busy the event stream is.
+TARGET_QUIET = 0.1  # Further changes of the target (a held volume key) settle this briefly; its first one and a card change wait for nothing.
 AUDIO_EVENT = re.compile(rb"Event '([a-z]+)' on (sink|server|card) #(\d+)")
 START_SECONDS = 6  # PipeWire must expose the filter's controls within this time.
 START_POLL_SECONDS = 0.12
 TERMINATE_SECONDS = 3
-STALE_SINK_SECONDS = 1.5  # A just-stopped filter can stay listed by pipewire-pulse for a moment.
-OWN_STALE_SECONDS = 4  # Our own previous filter (a rebuild) may linger longer; it is never "another" one.
-STEP_DB = 1.5  # Larger filter gain changes are written in steps of about this size to avoid zipper
-MAX_STEPS = 5  # noise, in at most this many pw-cli writes. The stage glides level, width and boost itself.
-STEP_OCTAVES = 0.5  # Filter frequency changes move in steps of at most this many octaves.
+STALE_SINK_SECONDS = 6  # A listed DeckyEQ sink may be our last filter or a copy Decky is unloading (killed after ~5 s).
+HANDOFF_SECONDS = 1  # Each pactl call that hands Steam's output back while Decky unloads us.
 SETTLE_SECONDS = 0.05  # Lets the last neutral write reach the audio before the filter ends.
 BASELINE_SECONDS = 15  # An edit may start from a readback this recent instead of a new pw-dump.
 MAX_PENDING = 8  # Legacy volume restores kept for absent devices/ports; the oldest are dropped.
@@ -52,6 +51,7 @@ def environment():
         env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
     else:
         env.pop("LD_LIBRARY_PATH", None)
+    env["LC_ALL"] = "C"  # Untranslated pactl events and messages, and JSON numbers with a decimal point.
     if platform.system() == "Linux":
         import pwd
         uid = os.geteuid()
@@ -133,6 +133,7 @@ class Runtime:
         self.stage_library = STAGE_LIBRARY
         self.sink_owner = None  # deckyeq.owner of the listed DeckyEQ sink, when pactl reports it.
         self.sink_index = None  # Our sink's pactl index: its own events need no reaction.
+        self.target_index = None  # The target's pactl index: its events (e.g. a port switch) need a quick reaction.
         self.supported = platform.system() == "Linux" and getattr(os, "geteuid", lambda: 0)() != 0 and all(self.tools.values())
         self.reason = None if self.supported else "Requires a non-root Decky session on Linux with system PipeWire and PulseAudio compatibility tools."
         self.process = None
@@ -147,6 +148,10 @@ class Runtime:
         self.sink_present = False
         self.pending = []  # Legacy restores whose device or port is absent (see recover()).
         self.subscriber = None
+        self.closing = False  # Set on unload: a start stops waiting for an old DeckyEQ sink to go.
+        self.started_at = -math.inf  # When the running filter became ready (monotonic).
+        self.target_at = -math.inf  # The last event of the target: a burst of them is one rescan.
+        self.linked = False  # WirePlumber has linked our filter in this session, so it is new enough to.
 
     @property
     def running(self):
@@ -164,11 +169,12 @@ class Runtime:
             while True:
                 chunk = await stream.read(65536)
                 if not chunk:
+                    if size > limit:
+                        raise EQError("Audio service response exceeded its size limit.")
                     return b"".join(chunks)
                 size += len(chunk)
-                if size > limit:
-                    raise EQError("Audio service response exceeded its size limit.")
-                chunks.append(chunk)
+                if size <= limit:  # Past it, drain to the end: an unread pipe never lets the tool be reaped.
+                    chunks.append(chunk)
         try:
             proc = await asyncio.create_subprocess_exec(executable, *args, env=self.env,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -187,7 +193,8 @@ class Runtime:
                     proc.kill()
                 except ProcessLookupError:
                     pass
-                await proc.wait()
+                # Read the pipes to their end first: a full one is paused, and wait() waits for them to close.
+                await asyncio.gather(proc.stdout.read(), proc.stderr.read(), proc.wait(), return_exceptions=True)
 
     async def wait_for_change(self, timeout):
         """Sleep until pactl reports a sink, card or server change, or the timeout ends.
@@ -224,17 +231,57 @@ class Runtime:
                 if event and not (event[1] == b"change" and event[2] == b"sink" and self.sink_index is not None
                                   and int(event[3]) == self.sink_index):
                     break
-            drained = time.monotonic() + EVENT_DRAIN_SECONDS
+            # Headphones plugged in under the speaker EQ: rescan now, not after the burst settles; undrained
+            # events just wake the next call. So does the target's first change after a quiet spell (its port
+            # switching); further ones (each step of a held volume key) settle briefly into one rescan.
+            target = lambda match: match and match[2] == b"sink" and int(match[3]) == self.target_index
+            fast = target(event)
+            if fast:
+                first = time.monotonic() - self.target_at > TARGET_QUIET
+                self.target_at = time.monotonic()
+                if first:
+                    return True
+            quiet = TARGET_QUIET if fast else EVENT_QUIET
+            drained, settled = time.monotonic() + EVENT_DRAIN_SECONDS, time.monotonic() + quiet
             try:
-                while time.monotonic() < drained and await asyncio.wait_for(
-                        subscriber.stdout.readline(), min(EVENT_QUIET, max(0.0, drained - time.monotonic()))):
-                    pass
+                while event[2] != b"card" and time.monotonic() < min(drained, settled):
+                    line = await asyncio.wait_for(subscriber.stdout.readline(),
+                                                  max(0.0, min(drained, settled) - time.monotonic()))
+                    later = AUDIO_EVENT.match(line)
+                    if not line or later and later[2] == b"card":
+                        break
+                    if target(later):
+                        self.target_at = time.monotonic()
+                    if not fast or target(later):
+                        settled = time.monotonic() + quiet
             except asyncio.TimeoutError:
                 pass
             return True
         except (OSError, ValueError):  # ValueError: an over-long line from the subscriber.
             await self.close_events()
             return True
+
+    def abandon(self):
+        """End the filter and the event subscriber at once, without the ramp (see Service.abandon).
+        WirePlumber then links the streams straight to the output, as after a crash."""
+        self.closing = True
+        if self.target and self.supported:
+            # Like stop(): Steam's output goes back to the filter's own output, not to any fallback. Blocking
+            # but bounded, since nothing awaited here would finish.
+            pactl = lambda *args: subprocess.run([self.tools["pactl"], *args], env=self.env, stdin=subprocess.DEVNULL,
+                                                 capture_output=True, check=True, timeout=HANDOFF_SECONDS).stdout
+            try:
+                if pactl("get-default-sink").decode("utf-8", "replace").strip() == SINK_NAME:
+                    pactl("set-default-sink", self.target)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            self.target = None  # Once: Decky 3.3 unloads us again for _uninstall, within the same ~5 s.
+        for proc in (self.process, self.subscriber):
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.send_signal(signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
     async def close_events(self):
         subscriber, self.subscriber = self.subscriber, None
@@ -243,10 +290,12 @@ class Runtime:
                 subscriber.kill()
             except ProcessLookupError:
                 pass
-            await subscriber.wait()
+            await asyncio.gather(subscriber.stdout.read(), subscriber.wait(), return_exceptions=True)  # As in run().
 
-    async def json_run(self, tool, *args):
+    async def json_run(self, tool, *args, empty=None):
         text = await self.run(tool, *args)  # A ToolError (no answer) passes through unchanged.
+        if empty is not None and not text.strip():
+            return empty
         try:
             return json.loads(text)
         except (ValueError, RecursionError):
@@ -259,6 +308,8 @@ class Runtime:
         self.sink_present = any(s.get("name") in (SINK_NAME, LEGACY_SINK_NAME) for s in sinks if isinstance(s, dict))
         ours = next((s for s in sinks if isinstance(s, dict) and s.get("name") == SINK_NAME), None)
         self.sink_index = ours.get("index") if ours and type(ours.get("index")) is int else None
+        target = next((s for s in sinks if isinstance(s, dict) and self.target and s.get("name") == self.target), None)
+        self.target_index = target.get("index") if target and type(target.get("index")) is int else None
         props = ours.get("properties") if ours else None
         self.sink_owner = props.get("deckyeq.owner") if isinstance(props, dict) else None
         return self.outputs, self.default
@@ -290,7 +341,9 @@ class Runtime:
 
     async def dump_node(self, node_id=None):
         """Our filter node, from the whole graph or, once its id is known, from just that object."""
-        node = self._own_node(await self.json_run("pw-dump", *([str(node_id)] if node_id is not None else [])))
+        args = [str(node_id)] if node_id is not None else []
+        # pw-dump <id> prints nothing, not [], once that object is gone (e.g. PipeWire restarted).
+        node = self._own_node(await self.json_run("pw-dump", *args, empty=[] if args else None))
         if node is None:
             raise NodeGone("DeckyEQ's live audio node is unavailable.")
         return node
@@ -376,8 +429,9 @@ class Runtime:
         except (OSError, ValueError, TypeError, KeyError):
             raise EQError("Could not restore audio routing from the previous session.") from None
 
-    async def start(self, eq, target, boost=0.0):
-        """Start the filter in front of target. Nothing else in the audio session changes."""
+    async def start(self, eq, target, boost=0.0, speakers_only=False):
+        """Start the filter in front of target. Nothing else in the audio session changes. OutputGone: the
+        target went away (or, with speakers_only, left its speaker port) meanwhile, so nothing runs."""
         if not self.supported:
             raise EQError(self.reason)
         if self.process is not None:
@@ -389,12 +443,13 @@ class Runtime:
         start = time.monotonic()
         while True:
             await self.scan()
-            mine = self.sink_owner == self.owner  # Our previous filter, e.g. during a rebuild.
-            if not self.sink_present or time.monotonic() - start >= (OWN_STALE_SECONDS if mine else STALE_SINK_SECONDS):
+            if self.closing:  # The unload must not wait for this or start a filter.
+                raise EQError("DeckyEQ is unloading.")
+            if not self.sink_present or time.monotonic() - start >= STALE_SINK_SECONDS:
                 break
             await asyncio.sleep(START_POLL_SECONDS)
         if target not in {o["name"] for o in self.outputs}:
-            raise EQError("Selected output is not connected.")
+            raise OutputGone("Selected output is not connected.")
         if self.sink_present and self.sink_owner != self.owner:
             raise EQError("Another DeckyEQ audio node is already active. Reload Decky before enabling EQ.")
         if not self.stage_library.is_file():
@@ -403,13 +458,12 @@ class Runtime:
         # Started neutral, then moved to the settings like any edit: no cut when WirePlumber links it in.
         atomic_json(self.config, filter_config(flat_eq(), target, self.owner, self.stage_library))
         try:
-            await self._spawn(eq, boost)
-            await self.scan()  # Learn our new sink's index, so its own events need no rescan.
+            await self._spawn(eq, boost, speakers_only)
         except BaseException:
             await self.stop()
             raise
 
-    async def _spawn(self, eq, boost):
+    async def _spawn(self, eq, boost, speakers_only=False):
         self.log = ""
         child_env = self.env.copy()
         # Do not inherit user filter fragments into our private client graph.
@@ -426,19 +480,33 @@ class Runtime:
         start = neutral()
         deadline = time.monotonic() + START_SECONDS
         while True:
+            if self.closing:  # Unloading: start() stops the half-started filter instead of waiting it out.
+                raise EQError("DeckyEQ is unloading.")
             if self.process.returncode is not None:
                 raise EQError("PipeWire could not start the equalizer: " + self.log[-240:])
             if time.monotonic() >= deadline:
+                await self.scan()  # An output unplugged meanwhile is no WirePlumber problem.
+                if self.target not in {o["name"] for o in self.outputs}:
+                    raise OutputGone("Selected output is not connected.")
+                if self.linked:  # It linked us before: restarting with PipeWire, not too old. Retried quietly.
+                    raise ToolError("WirePlumber has not linked the equalizer yet.")
                 raise EQError("WirePlumber did not insert the equalizer in front of the output. "
                               "DeckyEQ needs WirePlumber 0.5 or newer (SteamOS 3.7+).")
             objects = await self.json_run("pw-dump")
             node = self._own_node(objects)
             # Ready once the controls are live and WirePlumber has linked the filter to its output.
             if node is not None and same_controls(read_controls(node), start) and self._linked(objects):
-                self.node = node
+                self.node, self.linked = node, True
                 break
             await asyncio.sleep(START_POLL_SECONDS)
         self.last_controls, self.verified_at = start, time.monotonic()
+        self.started_at = self.verified_at
+        await self.scan()  # Learn our new sink's index, so its own events need no rescan, and the output's port now.
+        output = next((o for o in self.outputs if o["name"] == self.target), None)
+        if output is None or speakers_only and not output["speaker"]:
+            # Unplugged, or headphones plugged in, while starting: never raised to the speaker EQ.
+            raise OutputGone("Selected output is not connected." if output is None else
+                             "Speakers only is on, so EQ is off on this output.")
         await self._write(expected, use_cache=True)
 
     def _own_node(self, objects):
@@ -516,19 +584,12 @@ class Runtime:
         old = {key: actual[key] for key in expected}
         # Lower the level before changing filters and raise it only after they are confirmed, so a
         # partial write never plays new boosts at the old level. The stage glides each level change;
-        # filter gains move in interpolated steps against zipper noise.
+        # the filters change in one write: PipeWire 1.6 clears a biquad's history on every change of
+        # it, so intermediate steps would only add more clicks, not smooth one.
         low = min(old[LEVEL], expected[LEVEL])
         if old[LEVEL] > low:
             await self._set(node_id, {LEVEL: low})
-        largest = max((abs(v - old[k]) for k, v in expected.items() if k.endswith(":Gain")), default=0.0)
-        glides = {k for k, v in expected.items() if k.endswith(":Freq") and v > 0 and old[k] > 0 and v != old[k]}
-        octaves = max((abs(math.log2(expected[k] / old[k])) for k in glides), default=0.0)
-        steps = min(MAX_STEPS, max(1, math.ceil(largest / STEP_DB), math.ceil(octaves / STEP_OCTAVES)))
-        for step in range(1, steps + 1):
-            t = step / steps
-            values = {k: frequency(old[k] * (v / old[k]) ** t) if k in glides else old[k] + (v - old[k]) * t
-                      for k, v in expected.items() if k != LEVEL}
-            await self._set(node_id, values)
+        await self._set(node_id, {k: v for k, v in expected.items() if k != LEVEL})
         staged = {**expected, LEVEL: low}
         actual_node = await self.dump_node(node_id)
         confirmed = self._confirmed(actual_node, serial, staged)
@@ -539,21 +600,27 @@ class Runtime:
         self.node, self.last_controls = actual_node, expected
         self.verified_at = time.monotonic() if confirmed else -math.inf
 
-    async def stop(self):
-        """End the filter. WirePlumber then links its streams straight to the output."""
+    async def stop(self, mute=False):
+        """End the filter. WirePlumber then links its streams straight to the output. mute ends it at
+        once, silenced by one write instead of the neutral ramp (the speaker EQ must not reach headphones)."""
+        if mute and self.running:
+            try:  # The stage glides the level ~10 ms, so muting does not click.
+                await self._set(str(self.node["id"]), {LEVEL: MUTED, "stage:gain": 0.0})
+            except Exception:  # Best effort: the filter process must end whatever went wrong.
+                pass
         if self.target and self.supported:
             try:
                 # If Steam's output is the filter itself, hand it to the filter's own output first
                 # rather than letting WirePlumber fall back to any other device.
                 if (await self.run("pactl", "get-default-sink")).strip() == SINK_NAME:
                     await self.run("pactl", "set-default-sink", self.target)
-            except EQError:
+            except Exception:
                 pass
-        if self.running:
-            try:  # Back to neutral in steps, so playing on without the filter sounds the same.
+        if self.running and not mute:
+            try:  # Back to neutral first, so playing on without the filter sounds the same.
                 await self._write(neutral(), use_cache=False)
                 await asyncio.sleep(SETTLE_SECONDS)
-            except EQError:
+            except Exception:
                 pass
         if self.process is not None and self.process.returncode is None:
             try:
@@ -571,7 +638,10 @@ class Runtime:
                         self.process.kill()
                 except (ProcessLookupError, PermissionError):
                     pass
-                await self.process.wait()
+                try:  # Bounded: a child that left the group would keep its stderr pipe, and wait(), open.
+                    await asyncio.wait_for(self.process.wait(), TERMINATE_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
         if self.reader:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)

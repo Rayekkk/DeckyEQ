@@ -47,7 +47,7 @@ def atomic_json(path: Path, value):
             os.unlink(temp)
 
 
-def read_json(path: Path, limit=512 * 1024):
+def read_json(path: Path, limit=4 * 1024 * 1024):  # Settings with 64 presets and 200 game sounds stay under 1 MiB.
     if path.is_symlink():
         raise EQError("Symbolic link files are not supported.")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -85,14 +85,17 @@ class Store:
         state = validate_state(state)
         # Commit the authoritative file last. A failed write never changes live state.
         # The backup tracks the previously committed state, never a proposed write.
-        if backup and self.path.exists():
-            try:
-                old = validate_state(read_json(self.path))
-            except (OSError, ValueError, UnicodeError, RecursionError):
-                old = None
-            if old is not None:
-                atomic_json(self.backup, portable_state(old))
-        atomic_json(self.path, portable_state(state))
+        try:
+            if backup and self.path.exists():
+                try:
+                    old = validate_state(read_json(self.path))
+                except (OSError, ValueError, UnicodeError, RecursionError):
+                    old = None
+                if old is not None:
+                    atomic_json(self.backup, portable_state(old))
+            atomic_json(self.path, portable_state(state))
+        except OSError:  # E.g. a full disk. No path in the message, which names the user (see PresetFiles.read).
+            raise EQError("Settings could not be saved. Check free space.") from None
 
 
 class PresetFiles:
@@ -131,10 +134,18 @@ class PresetFiles:
         if path.suffix.lower() != ".json":
             raise EQError("Choose a .json preset file.")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        with os.fdopen(os.open(path, flags), "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        # Short messages without the path, which names the user: toasts can be seen on a stream.
+        try:
+            fd = os.open(path, flags)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):  # Before fdopen, which refuses a folder by its fd number.
+                os.close(fd)
                 raise EQError("Choose a regular preset file.")
-            raw = handle.read(MAX_IMPORT_BYTES + 1)
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(MAX_IMPORT_BYTES + 1)
+        except (FileNotFoundError, NotADirectoryError):
+            raise EQError("That file is no longer there. Choose another one.") from None
+        except OSError:
+            raise EQError("That file cannot be read. Choose another one.") from None
         if len(raw) > MAX_IMPORT_BYTES:
             raise EQError(f"Preset files must be no larger than {MAX_IMPORT_BYTES // 1024} KiB.")
         try:
@@ -144,22 +155,25 @@ class PresetFiles:
 
     def write(self, document, title, directory=None):
         folder = self._inside_home(directory or str(self.default_directory))
-        safe_directory(folder)
         slug = re.sub(r"[^A-Za-z0-9_-]+", "-", title).strip("-")[:60] or "preset"
         payload = (json.dumps(document, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode("utf-8")
-        for index in range(1, 1001):
-            path = folder / f"{slug}{'' if index == 1 else '-' + str(index)}.json"
-            try:
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                continue
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except BaseException:
-                path.unlink(missing_ok=True)
-                raise
-            return str(path)
+        try:  # E.g. no permission, a read-only card, a full disk: no path in the message (see read()).
+            safe_directory(folder)
+            for index in range(1, 1001):
+                path = folder / f"{slug}{'' if index == 1 else '-' + str(index)}.json"
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    continue
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(payload)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except BaseException:
+                    path.unlink(missing_ok=True)
+                    raise
+                return str(path)
+        except OSError:
+            raise EQError("Cannot save there. Choose another folder.") from None
         raise EQError("Too many exports with this name. Choose another folder.")

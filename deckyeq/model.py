@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -14,7 +15,7 @@ MAX_PRESETS = 64
 MAX_IMPORT_BYTES = 256 * 1024
 SCHEMA_VERSION = 2
 FILTER_TYPES = ("peaking", "lowshelf", "highshelf")
-FACTORY_IDS = {"flat", "go-s-original"}
+FACTORY_IDS = {"flat", "clear-voices", "more-bass", "go-s-original", "legion-go-2"}
 
 
 class EQError(ValueError):
@@ -27,6 +28,10 @@ class ToolError(EQError):
 
 class NodeGone(EQError):
     """Our filter's node vanished (e.g. PipeWire restarted) while its process lives: start it again."""
+
+
+class OutputGone(EQError):
+    """The output left (unplugged, or off its speaker port) while the filter started: wait for it, no error."""
 
 
 def number(value, low, high, label):
@@ -48,9 +53,28 @@ def frequency(value, legacy=False):
     return hz
 
 
-def name(value):
+BLANKS = {"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"}  # Hangul fillers and the Braille blank: drawn as nothing.
+
+
+ZWJ = "‍"  # Joins emoji such as a rainbow flag: allowed between two drawn characters.
+
+
+def disguising(value, i):
+    """True for a control, invisible/bidi formatting, private-use, unassigned or line-break character at
+    value[i], which can disguise a name as another or break the layout."""
+    drawn = lambda j: 0 <= j < len(value) and not value[j].isspace() and unicodedata.category(value[j]) not in ("Cc", "Cf")
+    return (unicodedata.category(value[i]) in ("Cc", "Cf", "Co", "Cn", "Zl", "Zp")
+            and not (value[i] == ZWJ and drawn(i - 1) and drawn(i + 1)))
+
+
+def name(value, stored=False):
+    # New names also refuse disguising characters, and names that draw as nothing (only blanks or
+    # combining marks); names already saved keep loading.
     if (not isinstance(value, str) or not 1 <= len(value.strip()) <= LIMITS["name_length"] or
-            any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
+            any(ord(c) < 32 or ord(c) == 127 and not stored or 0xD800 <= ord(c) <= 0xDFFF for c in value) or  # 1.0 saved DEL
+            not stored and (any(disguising(value, i) for i in range(len(value))) or
+                            all(c.isspace() or c in BLANKS or unicodedata.category(c) in ("Zs", "Mn", "Me")
+                                for c in value))):
         raise EQError(f"Preset names must contain 1–{LIMITS['name_length']} printable characters.")
     return value.strip()
 
@@ -58,6 +82,14 @@ def name(value):
 def flat_eq():
     return {"bands": [{"frequency": float(f), "gain": 0.0, "q": float(LIMITS["flat_q"]), "type": "peaking"} for f in FREQUENCIES],
             "bass": 0.0, "treble": 0.0, "preamp": 0.0, "auto_headroom": True, "width": 1.0, "limiter": True}
+
+
+def shaped_eq(gains):
+    """Flat, with these gains on the ten default frequencies."""
+    eq = flat_eq()
+    for band, gain in zip(eq["bands"], gains):
+        band["gain"] = float(gain)
+    return eq
 
 
 def go_s_eq():
@@ -73,6 +105,17 @@ def go_s_eq():
     return {"bands": [{"type": kind, "frequency": float(freq), "gain": float(gain), "q": 1.0}
                       for kind, freq, gain in specs],
             "bass": 0.0, "treble": 0.0, "preamp": 8.0, "auto_headroom": False, "width": 1.0, "limiter": True}
+
+
+def legion_go_2_eq():
+    """The owner's speaker tuning for the Legion Go 2, made from the Go S preset on the device."""
+    specs = [("lowshelf", 31.5, -3.5, 1.0), ("peaking", 63, 1.5, 1.4), ("peaking", 125, 4.5, 1.0),
+             ("peaking", 250, 4.5, 1.0), ("peaking", 500, -4, 1.0), ("highshelf", 1000, -4.5, 1.0),
+             ("peaking", 2000, -4, 1.0), ("peaking", 4000, 1.5, 1.4), ("peaking", 8000, 1.0, 1.4),
+             ("peaking", 16000, 1.0, 1.0)]
+    return {"bands": [{"type": kind, "frequency": float(freq), "gain": float(gain), "q": q}
+                      for kind, freq, gain, q in specs],
+            "bass": 2.5, "treble": 1.5, "preamp": 8.0, "auto_headroom": False, "width": 1.6, "limiter": True}
 
 
 EQ_KEYS = {"bands", "bass", "treble", "preamp", "auto_headroom"}
@@ -111,9 +154,28 @@ def validate_eq(value, legacy=False):
             "limiter": value["limiter"]}
 
 
+MAX_GAMES = 200
+APPID = re.compile(r"[0-9]{1,20}")  # Steam app ids, including the large ones of non-Steam shortcuts.
+
+
 def initial_state():
+    # scope: "" for the everyday sound, or the app id of the running game that has its own sound.
+    # The active sound always lives in selected/working; while a game's is active, the everyday
+    # sound waits in "outside", and every game's own sound in "games".
     return {"version": SCHEMA_VERSION, "enabled": False, "target": "", "speakers_only": True,
-            "boost": 0.0, "selected": "flat", "working": flat_eq(), "presets": []}
+            "boost": 0.0, "selected": "flat", "working": flat_eq(), "presets": [],
+            "scope": "", "games": {}, "outside": None}
+
+
+def game_name(value, stored=False):
+    if (not isinstance(value, str) or len(value) > 128 or
+            any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
+        raise EQError("Invalid game name.")
+    if not stored:  # Steam's title: cleaned like a preset name rather than refused; saved names keep loading.
+        value = "".join(c for i, c in enumerate(value) if not disguising(value, i))
+    if not value.strip():
+        raise EQError("Invalid game name.")
+    return value.strip()
 
 
 def validate_state(value):
@@ -125,7 +187,7 @@ def validate_state(value):
             raise EQError(f"Invalid {key} setting.")
         result[key] = value[key]
     target = value.get("target")
-    if not isinstance(target, str) or len(target) > 512 or any(ord(c) < 32 for c in target):
+    if not isinstance(target, str) or len(target) > 512 or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in target):
         raise EQError("Invalid audio output.")
     result["target"] = target
     # A global volume boost (1.1+), not part of any preset: the device is quiet, not the sound.
@@ -141,18 +203,60 @@ def validate_state(value):
         if item["id"] in ids:
             raise EQError("Duplicate preset identity.")
         ids.add(item["id"])
-        result["presets"].append({"id": item["id"], "name": name(item.get("name")),
+        result["presets"].append({"id": item["id"], "name": name(item.get("name"), stored=True),
                                    "eq": validate_eq(item.get("eq"), legacy=value["version"] == 1)})
     if not isinstance(value.get("selected"), str) or value["selected"] not in ids:
         raise EQError("The selected preset is missing.")
     result["selected"] = value["selected"]
+    legacy = value["version"] == 1
+    sound = lambda item: {"selected": item["selected"] if isinstance(item, dict) and isinstance(item.get("selected"), str)
+                          and item["selected"] in ids else "flat",
+                          "working": validate_eq(item.get("working") if isinstance(item, dict) else None, legacy=legacy)}
+    games = value.get("games", {})
+    if not isinstance(games, dict) or len(games) > MAX_GAMES:
+        raise EQError("Invalid game sounds.")
+    for appid, item in games.items():
+        if not isinstance(appid, str) or not APPID.fullmatch(appid) or not isinstance(item, dict):
+            raise EQError("Invalid game sound.")
+        result["games"][appid] = {"name": game_name(item.get("name"), stored=True), **sound(item)}
+    scope = value.get("scope", "")
+    if not isinstance(scope, str) or (scope != "" and scope not in result["games"]):
+        raise EQError("The active game sound is missing.")
+    result["scope"] = scope
+    outside = value.get("outside")
+    if (outside is None) != (scope == ""):
+        raise EQError("The everyday sound is missing.")
+    result["outside"] = None if outside is None else sound(outside)
     return result
+
+
+def switch_scope(state, scope):
+    """Make scope's sound the active one, putting the current one back where it belongs."""
+    if state["scope"] == scope:
+        return
+    current = {"selected": state["selected"], "working": copy.deepcopy(state["working"])}
+    if state["scope"] == "":
+        state["outside"] = current
+    elif state["scope"] in state["games"]:
+        state["games"][state["scope"]].update(current)
+    sound = state["outside"] if scope == "" else state["games"][scope]
+    state["selected"], state["working"] = sound["selected"], copy.deepcopy(sound["working"])
+    state["scope"] = scope
+    if scope == "":
+        state["outside"] = None
 
 
 def presets(state):
     return [{"id": "flat", "name": "Flat", "eq": flat_eq(), "factory": True},
-            {"id": "go-s-original", "name": "Legion Go S · Original", "eq": go_s_eq(), "factory": True,
-             "description": "Community speaker preset by GAZuOOT. Original +8 dB input boost; automatic headroom is off. Lower playback volume if it distorts."},
+            {"id": "clear-voices", "name": "Clear voices", "eq": shaped_eq([0, 0, -2, -2, 0, 1, 3, 3, 1, 0]), "factory": True,
+             "description": "Brings dialogue forward: a little less boom, more presence around 2–4 kHz."},
+            {"id": "more-bass", "name": "More bass", "eq": shaped_eq([0, 2, 5, 3, 0, 0, 0, 0, 0, 0]), "factory": True,
+             "description": "Fuller low end where small speakers can still play it, around 100–250 Hz."},
+            {"id": "go-s-original", "name": "Legion Go S", "eq": go_s_eq(), "factory": True,
+             "description": "Community speaker preset by GAZuOOT for the Legion Go S. If it sounds squashed, lower Input level under Equalizer."},
+            # Also sets the (global) Volume boost it was tuned with, when chosen.
+            {"id": "legion-go-2", "name": "Legion Go 2", "eq": legion_go_2_eq(), "factory": True, "boost": 9.0,
+             "description": "Speaker tuning for the Legion Go 2. Choosing it also sets Volume boost to 9 dB."},
             *copy.deepcopy(state["presets"])]
 
 
@@ -161,12 +265,12 @@ def selected_preset(state, preset_id=None):
     for preset in presets(state):
         if preset["id"] == preset_id:
             return preset
-    raise EQError("Preset no longer exists. Refresh and try again.")
+    raise EQError("Preset no longer exists. Try again.")
 
 
 def create_preset(state, title, eq):
     if len(state["presets"]) >= MAX_PRESETS:
-        raise EQError(f"The library is full ({MAX_PRESETS} user presets).")
+        raise EQError("The preset library is full. Delete some presets first.")
     title = name(title)
     used = {p["name"].casefold() for p in presets(state)}
     candidate, index = title, 2
@@ -202,7 +306,7 @@ def decode_import(text):
     elif value.get("format") == "deckyeq-bank":
         items = value.get("presets")
     else:
-        raise EQError("Choose a DeckyEQ preset or preset bank JSON file.")
+        raise EQError("This is not a DeckyEQ preset file.")
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_PRESETS:
         raise EQError(f"A preset bank must contain 1–{MAX_PRESETS} presets.")
     output = []
@@ -219,9 +323,16 @@ def portable(eq):
 
 
 def portable_state(state):
-    kept = {k: v for k, v in state.items() if k != "boost" or v}  # 1.0 never sees an unused boost.
-    return {**kept, "working": portable(state["working"]),
-            "presets": [{**p, "eq": portable(p["eq"])} for p in state["presets"]]}
+    # 1.0 ignores unknown keys; unused ones are left out anyway.
+    kept = {k: v for k, v in state.items() if (k != "boost" or v) and (k != "scope" or v)
+            and (k != "games" or v) and (k != "outside" or v is not None)}
+    result = {**kept, "working": portable(state["working"]),
+              "presets": [{**p, "eq": portable(p["eq"])} for p in state["presets"]]}
+    if state.get("games"):
+        result["games"] = {k: {**g, "working": portable(g["working"])} for k, g in state["games"].items()}
+    if state.get("outside"):
+        result["outside"] = {**state["outside"], "working": portable(state["outside"]["working"])}
+    return result
 
 
 def export_document(state, all_presets=False):

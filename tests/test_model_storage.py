@@ -2,14 +2,16 @@ import copy
 import json
 import math
 import os
+import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from deckyeq.graph import STAGE_LIBRARY, controls, control_payload, filter_config, headroom, read_controls, same_controls
-from deckyeq.model import (EQError, create_preset, decode_import, export_document, flat_eq,
-                          initial_state, portable_state, selected_preset, validate_eq, validate_state)
+from deckyeq.model import (EQError, name, create_preset, decode_import, export_document, flat_eq, game_name,
+                          initial_state, portable_state, presets, selected_preset, validate_eq, validate_state)
 from deckyeq.storage import PresetFiles, Store
 
 
@@ -48,6 +50,34 @@ class PresetTests(unittest.TestCase):
         self.assertEqual(second["name"], "flat (3)")
         self.assertNotEqual(first["id"], second["id"])
 
+    def test_clear_voices_and_more_bass_are_flat_with_their_gains_and_need_no_headroom(self):
+        expected = {"clear-voices": ("Clear voices", [0, 0, -2, -2, 0, 1, 3, 3, 1, 0],
+                                     "Brings dialogue forward: a little less boom, more presence around 2–4 kHz."),
+                    "more-bass": ("More bass", [0, 2, 5, 3, 0, 0, 0, 0, 0, 0],
+                                  "Fuller low end where small speakers can still play it, around 100–250 Hz.")}
+        listed = presets(initial_state())
+        self.assertEqual([p["id"] for p in listed], ["flat", "clear-voices", "more-bass", "go-s-original", "legion-go-2"])
+        for preset in listed[1:3]:
+            title, gains, description = expected[preset["id"]]
+            want = flat_eq()
+            for band, gain in zip(want["bands"], gains): band["gain"] = gain
+            with self.subTest(preset=preset["id"]):
+                self.assertEqual((preset["name"], preset["description"], preset["factory"]), (title, description, True))
+                self.assertEqual(preset["eq"], want)
+                self.assertEqual(validate_eq(preset["eq"]), preset["eq"])
+                self.assertEqual(headroom(preset["eq"]), {"compensation": 0.0, "effective_preamp": 0.0})
+
+    def test_user_presets_may_share_a_factory_name_but_never_a_factory_id(self):
+        state = initial_state()
+        state["presets"].append({"id": "a" * 32, "name": "More bass", "eq": flat_eq()})  # Saved before it was built in.
+        loaded = validate_state(state)
+        self.assertEqual(loaded["presets"], state["presets"])
+        self.assertEqual([p["name"] for p in presets(loaded)].count("More bass"), 2)
+        self.assertEqual(create_preset(loaded, "more bass", flat_eq())["name"], "more bass (2)")
+        for factory_id in ("clear-voices", "more-bass"):
+            state["presets"][0]["id"] = factory_id
+            with self.subTest(id=factory_id), self.assertRaises(EQError): validate_state(state)
+
     def test_numeric_rejection(self):
         for value in (float("nan"), float("inf"), True, "3", None, 13, -13):
             with self.subTest(value=value):
@@ -74,6 +104,14 @@ class PresetTests(unittest.TestCase):
             with self.subTest(sample=sample[:80]):
                 with self.assertRaises(EQError): decode_import(sample)
 
+    def test_a_file_of_another_kind_is_not_a_preset_file(self):
+        with self.assertRaisesRegex(EQError, r"^This is not a DeckyEQ preset file\.$"):
+            decode_import('{"version":2,"format":"something-else"}')
+
+    def test_go_s_description_points_to_input_level(self):
+        description = next(p["description"] for p in presets(initial_state()) if p["id"] == "go-s-original")
+        self.assertEqual(description, "Community speaker preset by GAZuOOT for the Legion Go S. If it sounds squashed, lower Input level under Equalizer.")
+
     def test_bank_is_fully_validated_before_import(self):
         bank = {"format": "deckyeq-bank", "version": 2, "presets": [
             {"name": "Valid", "eq": flat_eq()}, {"name": "Bad", "eq": {}}]}
@@ -91,7 +129,7 @@ class PresetTests(unittest.TestCase):
     def test_limit(self):
         state = initial_state()
         for i in range(64): create_preset(state, f"P{i}", flat_eq())
-        with self.assertRaises(EQError): create_preset(state, "Too many", flat_eq())
+        with self.assertRaisesRegex(EQError, r"^The preset library is full\. Delete some presets first\.$"): create_preset(state, "Too many", flat_eq())
 
 
 class GraphTests(unittest.TestCase):
@@ -166,7 +204,7 @@ class GraphTests(unittest.TestCase):
         from deckyeq.graph import ALLOWANCE, peak_gain
         eq = flat_eq()
         eq.update(bass=9, preamp=12, width=2.0)
-        self.assertAlmostEqual(headroom(eq, boost=6)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
+        self.assertAlmostEqual(headroom(eq)["compensation"], -(peak_gain(eq) - ALLOWANCE), places=4)
         self.assertGreater(headroom(eq)["effective_preamp"], 8)
         eq.update(preamp=-12)  # A lowered input level is room: no extra drop on top of it.
         self.assertEqual(headroom(eq)["compensation"], 0)
@@ -197,6 +235,33 @@ class GraphTests(unittest.TestCase):
         state["boost"] = 13
         with self.assertRaises(EQError):
             validate_state(state)
+
+    def test_game_sounds_round_trip_and_are_validated(self):
+        state = initial_state()
+        self.assertFalse({"scope", "games", "outside"} & set(portable_state(state)))  # 1.0 files stay as they were.
+        state["games"]["1145360"] = {"name": "Hades", "selected": "flat", "working": flat_eq()}
+        state["scope"], state["outside"] = "1145360", {"selected": "flat", "working": flat_eq()}
+        self.assertEqual(validate_state(json.loads(json.dumps(portable_state(state)))), state)
+        for key, value in (("scope", "730"), ("scope", ["x"]), ("outside", None), ("games", {"x1": state["games"]["1145360"]}),
+                           ("games", {"1": {"name": "", "selected": "flat", "working": flat_eq()}})):
+            with self.subTest(key=key, value=value), self.assertRaises(EQError):
+                validate_state({**state, key: value})
+        odd = {**state, "games": {"1": {"name": "x", "selected": ["flat"], "working": flat_eq()}}, "scope": "", "outside": None}
+        self.assertEqual(validate_state(odd)["games"]["1"]["selected"], "flat")  # Not a TypeError.
+
+    def test_a_full_library_of_presets_and_games_is_still_readable(self):
+        state = initial_state()
+        eq = flat_eq()
+        for band in eq["bands"]:
+            band["gain"], band["q"] = 3.3000000000000003, 1.2345678901234567
+        state["presets"] = [{"id": f"{i:032x}", "name": f"{i} " + "ゲ" * 36, "eq": eq} for i in range(64)]
+        state["games"] = {str(10 ** 15 + i): {"name": "ゲ" * 128, "selected": f"{i % 64:032x}", "working": eq} for i in range(200)}
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(temp)
+            store.save(state)
+            self.assertGreater((Path(temp) / "settings.json").stat().st_size, 512 * 1024)
+            store.save(state)  # Refreshes the backup from the large file.
+            self.assertEqual(store.load()["games"], state["games"])
 
     def test_files_carry_width_and_limiter_only_when_changed(self):
         # DeckyEQ 1.0 accepts exactly the older keys: unchanged presets and settings stay readable to it.
@@ -265,6 +330,48 @@ class HardeningTests(unittest.TestCase):
         for title in ("bad\x7f", "lone \ud800 surrogate", "tab\there"):
             with self.assertRaises(EQError): create_preset(initial_state(), title, flat_eq())
 
+    def test_a_name_with_del_saved_by_1_0_still_loads(self):
+        # DeckyEQ 1.0 accepted DEL; refusing it on load would make the whole settings file unreadable.
+        self.assertEqual(name("Old\x7f", stored=True), "Old\x7f")
+
+    def test_invisible_and_bidi_characters_are_refused_in_new_names_only(self):
+        disguised = ["Fl​at", "‮Flat", "Flat⁦", "﻿Flat", "Flat‏", "C1 \x85 control",
+                     # Drawn as nothing: Hangul fillers, the Braille blank, combining marks alone.
+                     "\u3164", "\u2800", "\u115f", "\u1160", "\uffa0", "\u0301\u0301", " \u3164 \u20dd",
+                     "Line\u2028break", "Para\u2029break", "Private \ue000", "Unassigned \u0378"]
+        for title in disguised:
+            with self.assertRaises(EQError): create_preset(initial_state(), title, flat_eq())
+            document = export_document(initial_state())
+            document["preset"]["name"] = title
+            with self.assertRaises(EQError): decode_import(json.dumps(document))
+        self.assertEqual(create_preset(initial_state(), "My sound 🎧 ünï", flat_eq())["name"], "My sound 🎧 ünï")
+        self.assertEqual(create_preset(initial_state(), "Cafe\u0301 ㄱ", flat_eq())["name"], "Cafe\u0301 ㄱ")
+        flag = "Night \U0001f3f3\ufe0f\u200d\U0001f308"  # An emoji joined by a ZWJ, as the Steam keyboard types it.
+        self.assertEqual(create_preset(initial_state(), flag, flat_eq())["name"], flag)
+        for joined in ("Flat\u200d", "\u200dFlat", "Fl\u200d\u200dat", "Fl \u200d at"):  # Joining nothing drawn.
+            with self.assertRaises(EQError): create_preset(initial_state(), joined, flat_eq())
+        # A library saved before the rule still loads, names unchanged.
+        state = initial_state()
+        state["presets"] = [{"id": f"{i:032x}", "name": title, "eq": flat_eq()} for i, title in enumerate(disguised)]
+        self.assertEqual([p["name"] for p in validate_state(state)["presets"]], [t.strip() for t in disguised])
+
+    def test_game_titles_lose_disguising_characters_and_saved_ones_still_load(self):
+        self.assertEqual(game_name("\u202eHades\u200b"), "Hades")
+        self.assertEqual(game_name("Fam \U0001f468\u200d\U0001f469"), "Fam \U0001f468\u200d\U0001f469")
+        with self.assertRaises(EQError): game_name("\u2066\u200b")  # Nothing drawn is left.
+        state = initial_state()
+        state["games"]["7"] = {"name": "\u202eHades", "selected": "flat", "working": flat_eq()}
+        self.assertEqual(validate_state(state)["games"]["7"]["name"], "\u202eHades")
+
+    def test_an_output_name_that_cannot_be_saved_is_refused(self):
+        with self.assertRaisesRegex(EQError, "audio output"):
+            validate_state({**initial_state(), "target": "alsa_output.\ud800"})  # A lone surrogate: no UTF-8.
+
+    def test_duplicate_keys_in_a_preset_file_are_refused(self):
+        document = json.dumps(export_document(initial_state()))
+        with self.assertRaisesRegex(EQError, "Duplicate"):
+            decode_import(document[:-1] + ', "format": "deckyeq-bank"}')
+
     def test_malformed_selected_preset_is_a_validation_error(self):
         state = initial_state()
         state["selected"] = ["flat"]
@@ -288,6 +395,14 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.load()["working"]["bass"], 0)
         self.assertIn("Recovered", self.store.warning)
         self.assertEqual(self.store.path.read_text(), "{broken")
+
+    def test_a_saved_user_preset_named_like_a_factory_preset_loads_untouched(self):
+        state = initial_state()
+        state["presets"].append({"id": "b" * 32, "name": "More bass", "eq": flat_eq()})
+        state["selected"] = "b" * 32
+        self.store.save(state)
+        self.assertEqual(self.store.load(), state)
+        self.assertIsNone(self.store.warning)
 
     def test_malformed_values_fall_back_to_last_good_settings(self):
         self.store.save(initial_state())
@@ -322,7 +437,7 @@ class StorageTests(unittest.TestCase):
             if Path(dst) == self.store.path: raise OSError("disk error")
             return original(src, dst)
         with patch("deckyeq.storage.os.replace", side_effect=fail_primary):
-            with self.assertRaises(OSError): self.store.save(state)
+            with self.assertRaisesRegex(EQError, r"^Settings could not be saved\. Check free space\.$"): self.store.save(state)
         self.assertEqual(self.store.path.read_bytes(), old)
         self.assertEqual(len(list(self.store.directory.glob(".settings*"))), 0)
 
@@ -333,6 +448,50 @@ class StorageTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(Path(first).parent, self.home / "Documents" / "DeckyEQ")
         self.assertEqual(decode_import(self.files.read(first))[0]["eq"], flat_eq())
+
+    def test_file_errors_are_short_and_name_no_path(self):
+        # Toasts can be seen on a stream: not "[Errno 13] Permission denied: '/home/deck/...'".
+        document = export_document(initial_state())
+        for error in (PermissionError(13, "Permission denied", str(self.home / "Flat.json")),
+                      OSError(30, "Read-only file system", str(self.home / "Flat.json"))):
+            with patch("deckyeq.storage.os.open", side_effect=error):
+                with self.assertRaisesRegex(EQError, r"^Cannot save there\. Choose another folder\.$"):
+                    self.files.write(document, "Flat")
+        with patch("deckyeq.storage.os.open", side_effect=PermissionError(13, "Permission denied", str(self.home / "x.json"))):
+            with self.assertRaisesRegex(EQError, r"^That file cannot be read\. Choose another one\.$"):
+                self.files.read(str(self.home / "x.json"))
+        (self.home / "file").write_text("x")
+        for gone in (self.home / "gone.json", self.home / "file" / "x.json"):  # ENOENT, ENOTDIR
+            with self.assertRaisesRegex(EQError, r"^That file is no longer there\. Choose another one\.$"):
+                self.files.read(str(gone))
+        (self.home / "folder.json").mkdir()
+        with self.assertRaisesRegex(EQError, r"^Choose a regular preset file\.$" if os.name == "posix" else
+                                    r"^That file cannot be read\. Choose another one\.$"):  # Windows: EACCES.
+            self.files.read(str(self.home / "folder.json"))
+
+    @unittest.skipUnless(os.name == "posix", "file modes and FIFOs are POSIX")
+    def test_exports_are_private_and_a_fifo_never_blocks_an_import(self):
+        path = Path(self.files.write(export_document(initial_state()), "Flat"))
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        fifo = self.home / "pipe.json"
+        os.mkfifo(fifo)
+        done = []
+        reader = threading.Thread(target=lambda: done.append(self.assertRaises(EQError, self.files.read, str(fifo))))
+        reader.start()
+        reader.join(5)
+        blocked = reader.is_alive()
+        if blocked:  # Opened without O_NONBLOCK: it waits for a writer. Give it one so the test ends.
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            reader.join(5)
+        self.assertFalse(blocked, "reading a FIFO blocked")
+        self.assertTrue(done)
+
+    def test_a_linked_settings_file_is_not_followed(self):
+        elsewhere = self.home / "elsewhere.json"
+        elsewhere.write_text(json.dumps({**initial_state(), "enabled": True}))
+        try: self.store.path.symlink_to(elsewhere)
+        except OSError: self.skipTest("Host cannot create symbolic links")
+        with self.assertRaisesRegex(EQError, "could not be read"): self.store.load()
 
     def test_file_boundaries(self):
         with self.assertRaises(EQError): self.files.read(str(self.home.parent / "outside.json"))

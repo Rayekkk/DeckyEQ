@@ -40,6 +40,7 @@ CA_BUNDLES = (
 )
 _VERSION = re.compile(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})")
 _DIGEST = re.compile(r"sha256:([0-9a-fA-F]{64})")
+_PART = re.compile(r"\.deckyeq-download-[0-9a-f]{32}\.part")
 
 
 def _version(value):
@@ -124,6 +125,7 @@ class PluginUpdates:
         self._release = None
         self._closed = threading.Event()
         self._publication_lock = threading.Lock()
+        self._started = time.time()  # Our own partial downloads older than this were left by a killed run.
 
     def close(self):
         # Synchronize only the final rename, never wait for the network worker.
@@ -205,8 +207,9 @@ class PluginUpdates:
                 result["error"] = "The release has no unique DeckyEQ installation ZIP yet."
             return result, None
         asset = matching[0]
-        # Uploaded by the release workflow, not by hand: a stolen login alone cannot pass a ZIP off
-        # as a release build (the workflow also attests where it was built).
+        # Uploaded by a workflow run in this repository, not by hand (the workflow also attests where it
+        # was built). It does not prove which workflow or ref: any workflow here uploads as this bot. Immutability
+        # (above) stops the asset being replaced after publication; only a signature would prove who built it.
         uploader = asset.get("uploader")
         if not isinstance(uploader, dict) or uploader.get("login") != RELEASE_UPLOADER:
             if available:
@@ -359,13 +362,18 @@ class PluginUpdates:
                 os.path.normpath(home) != home or
                 type(self.user_gid) is not int or self.user_gid < 0):
             raise ValueError("The console user's home directory could not be verified.")
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-        fd = os.open("/", flags)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
         try:
-            for part in home.lstrip("/").split("/"):
-                next_fd = os.open(part, flags, dir_fd=fd)
-                os.close(fd)
-                fd = next_fd
+            # Links above HOME are the system's business (/home -> /var/home on Fedora Atomic);
+            # HOME itself and everything below it must be real directories.
+            parent = os.open(os.path.dirname(home), flags)
+            try:
+                fd = os.open(os.path.basename(home), flags | os.O_NOFOLLOW, dir_fd=parent)
+            finally:
+                os.close(parent)
+        except OSError as error:
+            raise ValueError("The console user's home directory could not be verified.") from error
+        try:
             if os.fstat(fd).st_uid != self.user_uid:
                 raise ValueError("The home directory does not belong to the console user.")
             return fd
@@ -455,6 +463,19 @@ class PluginUpdates:
         except OSError:
             return False
 
+    def _remove_stale_parts(self, directory_fd):
+        # Decky kills the plugin ~5 s after unloading it, maybe mid-download: remove such leftovers of ours,
+        # never another user's file, a link, or a part a still-running older copy may be writing now.
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                    if (_PART.fullmatch(entry.name) and stat.S_ISREG(info.st_mode) and
+                            info.st_uid == self.user_uid and info.st_mtime < self._started):
+                        os.unlink(entry.name, dir_fd=directory_fd)
+                except OSError:
+                    pass
+
     def _save(self, release):
         self._ensure_open()
         directory_fd, path = self._open_downloads()
@@ -462,6 +483,7 @@ class PluginUpdates:
         try:
             if self._existing_matches(directory_fd, release):
                 return path + "/" + release["name"]
+            self._remove_stale_parts(directory_fd)
             candidate = f".deckyeq-download-{secrets.token_hex(16)}.part"
             fd = os.open(candidate, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=directory_fd)

@@ -2,6 +2,7 @@
 Regenerate after an intended change with: DECKYEQ_UPDATE_FIXTURES=1 python -m unittest tests.test_contract"""
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,9 +27,11 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
                 await service.action("edit", {"eq": eq}, 0)
                 await service.action("save_as", {"name": "Warm"}, 1)
             await service.action("select", {"id": "flat"}, 2)
+            await service.set_game("1145360", "Hades")  # A running game that has its own sound.
+            await service.action("own_sound", {"enabled": True, "appid": "1145360"}, 3)
             snapshot = json.loads(json.dumps(service.snapshot()))
         snapshot.update(version="0.0.0", home="/home/deck", export_directory="/home/deck/Documents/DeckyEQ")
-        if os.environ.get("DECKYEQ_UPDATE_FIXTURES"):
+        if os.environ.get("DECKYEQ_UPDATE_FIXTURES") == "1":
             FIXTURE.parent.mkdir(exist_ok=True)
             FIXTURE.write_bytes((json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
         self.assertEqual(snapshot, json.loads(FIXTURE.read_text(encoding="utf-8")))
@@ -50,7 +53,20 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(span(eq["bass"]), LIMITS["tone_gain"])
         self.assertEqual(span(eq["treble"]), LIMITS["tone_gain"])
         self.assertEqual(span(eq["preamp"]), LIMITS["preamp"])
+        self.assertEqual(span(eq["width"]), LIMITS["width"])  # Volume boost is global, so not in a preset.
         self.assertEqual(schema["$defs"]["preset"]["properties"]["name"]["maxLength"], LIMITS["name_length"])
+
+
+class ActionTests(unittest.TestCase):
+    def test_the_frontend_sends_the_backends_action_names(self):
+        from deckyeq.service import HANDLERS
+        code = "\n".join(path.read_text(encoding="utf-8") for path in (FIXTURE.parent.parent.parent / "src").glob("*.ts*")
+                         if path.name != "updates.tsx")  # Its controller.run("check" | "download") is not a backend action.
+        direct = {"refresh", "export"}  # Handled in Service._action itself, not through HANDLERS.
+        sent = set(re.findall(r'\b(?:run|perform)\(\s*"(\w+)"', code))
+        self.assertLessEqual(sent, set(HANDLERS) | direct)
+        for name in set(HANDLERS) | direct:  # save_as and rename are passed to the name dialog instead.
+            self.assertIn(f'"{name}"', code, name)
 
 
 if __name__ == "__main__":

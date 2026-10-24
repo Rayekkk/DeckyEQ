@@ -30,9 +30,13 @@ def random_eq(rng):
 def vectors():
     rng = random.Random(7)
     eqs = [random_eq(rng) for _ in range(60)]
+    floor = flat_eq()  # So much boost that the level reaches the stage's -96 dB floor.
+    for band in floor["bands"]:
+        band.update(type="lowshelf", frequency=16000.0, gain=12.0)
+    floor.update(bass=9.0, preamp=4.0)
+    eqs.append(floor)
     hz = [0, 0.5, 6, 19.99, 20, 31.25, 1000, 19999, 20000, 20000.5, 23999, 24000, 40000, 48000]
-    boosts = [rng.choice([0.0, 0.0, 6.0]) for _ in eqs]
-    return {"headroom": [{"eq": eq, "boost": b, "expected": headroom(eq, b)} for eq, b in zip(eqs, boosts)],
+    return {"headroom": [{"eq": eq, "expected": headroom(eq)} for eq in eqs],
             "frequency": [{"hz": value, "expected": frequency(value)} for value in hz],
             "flat": flat_eq()}
 
@@ -40,7 +44,7 @@ def vectors():
 class ParityTests(unittest.TestCase):
     def test_frontend_parity_vectors_match_the_backend(self):
         data = json.loads(json.dumps(vectors()))
-        if os.environ.get("DECKYEQ_UPDATE_FIXTURES"):
+        if os.environ.get("DECKYEQ_UPDATE_FIXTURES") == "1":
             FIXTURE.write_bytes((json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8"))
         self.assertEqual(data, json.loads(FIXTURE.read_text(encoding="utf-8")))
 

@@ -12,10 +12,12 @@
 //
 // The bass band (below BASS_HZ) is limited first, on its own and BASS_ROOM_DB below the ceiling,
 // so a loud bass note does not turn down voices and everything else with it. A second limiter on
-// the whole signal then guarantees the ceiling, also for peaks between samples (a DAC or a Bluetooth
-// codec reconstructs them): its detector looks at the signal 4x oversampled (8-tap Lanczos), which
-// needs DETECT_LAG more frames of delay; the hold keeps every such gain in force long enough. Both
-// limiters always run: they change nothing below their ceilings.
+// the whole signal then guarantees the ceiling for every sample and also limits peaks between samples
+// (a DAC or a Bluetooth codec reconstructs them): its detector looks at the signal 4x oversampled
+// (8-tap Lanczos), which needs DETECT_LAG more frames of delay; the hold keeps every such gain in force
+// long enough. 8 taps only approximate those peaks: bright, clipped noise boosted by +12 dB was
+// measured up to +2.5 dBTP at 48 kHz (+2.7 at 96 kHz). Both limiters always run: they change nothing
+// below their ceilings.
 #define _DEFAULT_SOURCE  // M_PI
 #include <math.h>
 #include <stdlib.h>
@@ -146,6 +148,13 @@ static double section_run(Section *f, double x) {
   return y;
 }
 
+// After a note fades into silence the states decay into subnormals, which are slow on x86 and, as
+// floats in the buffers and the output, appear within one long block: flushed every frame.
+static void section_flush(Section *f) {
+  if (fabs(f->z1) < 1e-20) f->z1 = 0.0;
+  if (fabs(f->z2) < 1e-20) f->z2 = 0.0;
+}
+
 typedef struct {
   LADSPA_Data *port[PORTS];
   unsigned long size;                               // Look-ahead window in frames.
@@ -218,8 +227,14 @@ static void reset_split(Stage *s) {
     }
 }
 
+// Both limiters' look-ahead, the second's with DETECT_LAG: 146 frames at 48 kHz.
+static void report_latency(Stage *s) {
+  if (s->port[LATENCY]) *s->port[LATENCY] = (LADSPA_Data)((s->size - 1) + (s->delay_size - 1));
+}
+
 static void activate(LADSPA_Handle h) {
   Stage *s = h;
+  report_latency(s);  // PipeWire reads it right after activate(), before the first run().
   limiter_reset(&s->bass);
   limiter_reset(&s->full);
   reset_split(s);
@@ -268,7 +283,8 @@ static void run(LADSPA_Handle h, unsigned long frames) {
     s->gain = glide_to(s->gain, gain_target, s->glide);
     double mid = 0.5 * ((double)in_l[n] + in_r[n]), side = 0.5 * ((double)in_l[n] - in_r[n]) * s->width;
     double l = (mid + side) * s->gain, r = (mid - side) * s->gain;
-    if (!isfinite(l) || !isfinite(r)) l = r = 0.0;  // Never let a bad sample poison the state.
+    // Never let a bad sample poison the state; an absurd finite one would mute the limiter for 0.5 s.
+    if (!isfinite(l) || !isfinite(r) || fabs(l) > 1e4 || fabs(r) > 1e4) l = r = 0.0;
 
     // 1. The bass band gets its own limiter, so a loud bass note turns down only the bass. With
     // it idle the two bands add up to the input with a flat response (only the phase of the
@@ -277,10 +293,11 @@ static void run(LADSPA_Handle h, unsigned long frames) {
     double low_r = section_run(&s->low[1][1], section_run(&s->low[1][0], r));
     double high_l = section_run(&s->high[0][1], section_run(&s->high[0][0], l));
     double high_r = section_run(&s->high[1][1], section_run(&s->high[1][0], r));
-    if (!isfinite(low_l + low_r + high_l + high_r)) {  // Absurd input overflowed a filter: start afresh.
-      reset_split(s);
-      low_l = low_r = high_l = high_r = 0.0;
-    }
+    for (int c = 0; c < 2; c++)
+      for (int k = 0; k < 2; k++) {
+        section_flush(&s->low[c][k]);
+        section_flush(&s->high[c][k]);
+      }
     unsigned long i = s->split_pos;
     s->high_l[i] = (float)high_l; s->high_r[i] = (float)high_r;
     s->low_l[i] = (float)low_l; s->low_r[i] = (float)low_r;
@@ -292,7 +309,7 @@ static void run(LADSPA_Handle h, unsigned long frames) {
     l = s->high_l[o] + bass_gain * s->low_l[o];
     r = s->high_r[o] + bass_gain * s->low_r[o];
 
-    // 2. The whole signal, including peaks between samples, stays under the ceiling.
+    // 2. Every sample stays under the ceiling; so do peaks between samples, as far as 8 taps see them.
     s->delay_l[s->delay_pos] = (float)l;
     s->delay_r[s->delay_pos] = (float)r;
     s->history_l[s->history_pos] = l;
@@ -317,7 +334,7 @@ static void run(LADSPA_Handle h, unsigned long frames) {
     if (gain < lowest) lowest = gain;
   }
   if (s->port[REDUCTION]) *s->port[REDUCTION] = (LADSPA_Data)(20.0 * log10(fmax(lowest, 1e-6)));
-  if (s->port[LATENCY]) *s->port[LATENCY] = (LADSPA_Data)((s->size - 1) + (s->delay_size - 1));
+  report_latency(s);
 }
 
 static void cleanup(LADSPA_Handle h) {

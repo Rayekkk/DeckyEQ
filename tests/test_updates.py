@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import struct
 import tempfile
@@ -41,7 +42,7 @@ def package(version=NEW, extra=None, manifest=None):
 
 def metadata(payload=None, version=NEW):
     payload = package(version) if payload is None else payload
-    tag = "v" + version
+    tag = version  # Tagged like the owner's other plugins: 1.1.0, no "v".
     name = f"{updates.ARCHIVE_ROOT}-{version}.zip"
     return {
         "tag_name": tag, "draft": False, "prerelease": False,
@@ -417,12 +418,33 @@ class DownloadFiles(_UpdateFixture):
         alias = self.root / "alias"
         alias.symlink_to(real_home, target_is_directory=True)
         self.updater.user_home = str(alias)
-        self.assertFalse(self.do_download()["success"])
+        result = self.do_download()
+        self.assertFalse(result["success"])
+        self.assertIn("home directory could not be verified", result["error"])  # Not blamed on Downloads.
         self.updater.user_home = str(real_home)
         (self.home / ".config").symlink_to(outside, target_is_directory=True)
         (outside / "user-dirs.dirs").write_text(f'XDG_DOWNLOAD_DIR="{outside}"\n')
         self.assertTrue(self.do_download()["success"])
         self.assertEqual([file.name for file in outside.iterdir()], ["user-dirs.dirs"])
+
+    def test_home_reached_through_a_linked_parent_works_but_a_linked_downloads_does_not(self):
+        # Fedora Atomic and Bazzite link /home to /var/home; HOME itself is still a real folder.
+        real = self.root / "var-home"
+        real.mkdir()
+        self.home.rename(real / "deck")
+        (self.root / "home").symlink_to(real, target_is_directory=True)
+        self.updater.user_home = str(self.root / "home" / "deck")
+        result = self.do_download()
+        self.assertTrue(result["success"], result)
+        self.assertTrue((real / "deck" / "Downloads" / metadata()["assets"][0]["name"]).is_file())
+        outside = self.root / "outside"
+        outside.mkdir()
+        shutil.rmtree(real / "deck" / "Downloads")
+        (real / "deck" / "Downloads").symlink_to(outside, target_is_directory=True)
+        result = self.do_download()
+        self.assertFalse(result["success"])
+        self.assertIn("Downloads folder is a link", result["error"])
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_directory_changed_to_symlink_between_creation_check_and_open_is_rejected(self):
         downloads = self.home / "Downloads"
@@ -471,14 +493,51 @@ class DownloadFiles(_UpdateFixture):
         self.assertNotEqual(outside.stat().st_ino, target.stat().st_ino)
 
     def test_unavailable_account_and_wrong_home_owner_fail_before_download(self):
-        self.updater.user_uid = -1
-        result = self.do_download()
-        self.assertFalse(result["success"])
-        self.assertIn("desktop user", result["error"])
-        self.assertFalse((self.home / "Downloads").exists())
+        for uid in (-1, 0):  # 0: root's home, never the console user's.
+            self.updater.user_uid = uid
+            result = self.do_download()
+            self.assertFalse(result["success"])
+            self.assertIn("desktop user", result["error"])
+            self.assertFalse((self.home / "Downloads").exists())
         self.updater.user_uid = self.uid + 1
         self.assertFalse(self.do_download()["success"])
         self.assertFalse((self.home / "Downloads").exists())
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "names an open folder through /proc")
+    def test_a_downloads_folder_of_another_user_is_refused(self):
+        downloads = self.home / "Downloads"
+        downloads.mkdir()
+        real_fstat = os.fstat
+        def fstat(fd):
+            info = real_fstat(fd)
+            if os.readlink(f"/proc/self/fd/{fd}") == str(downloads):  # As if another account owned it.
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, self.uid + 1, *info[5:10]))
+            return info
+        with patch("deckyeq.updates.os.fstat", side_effect=fstat):
+            result = self.do_download()
+        self.assertFalse(result["success"])
+        self.assertIn("does not belong", result["error"])
+        self.assertEqual(list(downloads.iterdir()), [])
+
+    def test_only_our_own_stale_partial_downloads_are_removed(self):
+        # Decky kills the plugin ~5 s after unloading it, maybe mid-download.
+        downloads = self.home / "Downloads"
+        downloads.mkdir()
+        os.chown(downloads, self.uid, self.gid)
+        stale, fresh = (downloads / f".deckyeq-download-{c * 32}.part" for c in "ab")
+        other, outside = downloads / "notes.part", self.root / "outside.part"
+        for path in (stale, fresh, other, outside):
+            path.write_bytes(b"partial")
+        linked = downloads / f".deckyeq-download-{'c' * 32}.part"
+        linked.symlink_to(outside)
+        old = time.time() - 3600
+        for path in (stale, other):
+            os.utime(path, (old, old))
+        os.utime(linked, (old, old), follow_symlinks=False)
+        os.utime(fresh, (self.updater._started + 1,) * 2)  # A still-running older copy may be writing it.
+        self.assertTrue(self.do_download()["success"])
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists() and other.exists() and linked.is_symlink() and outside.exists())
 
     def test_cancel_just_before_publication_retains_the_original_file(self):
         downloads = self.home / "Downloads"

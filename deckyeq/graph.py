@@ -20,6 +20,9 @@ MUTED = -96.0  # The stage's lowest level.
 STAGE_LIBRARY = Path(__file__).resolve().parent.parent / "bin" / "deckyeq_dsp.so"
 RATE = float(LIMITS["sample_rate"])  # The combined response is evaluated at SteamOS's usual rate.
 NYQUIST = RATE / 2
+# Graph rates PipeWire runs at: a lower read-back Freq is taken as the clamp only at one of these, so a write that left
+# an old frequency (e.g. 10 kHz) is still a mismatch.
+RATES = {8000.0, 11025.0, 16000.0, 22050.0, 24000.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0}
 # Check points 1/24 octave apart from 10 Hz; 0 Hz, Nyquist and each filter's frequency are added,
 # and every local maximum is then refined, so narrow resonances are not missed between points.
 GRID = tuple(10 * 2 ** (i / 24) for i in range(int(24 * math.log2(NYQUIST / 10)) + 1))
@@ -98,13 +101,12 @@ def peak_gain(eq):
     return _peak(filters) if filters else 0.0
 
 
-def headroom(eq, boost=0.0):
+def headroom(eq):
     # The limiter always guards the output, so headroom only keeps it from squashing large EQ boosts:
     # the level drops by the part of the filters' combined peak above ALLOWANCE. It never takes back
     # the input level, the volume boost or stereo widening, which the user chose to be louder or
     # wider (a lowered input level still counts as room). The preset field auto_headroom is kept for
-    # compatibility and no longer read. boost is accepted for symmetry with controls() only.
-    del boost
+    # compatibility and no longer read.
     excess = peak_gain(eq) + min(0.0, eq["preamp"]) - ALLOWANCE
     compensation = -excess if excess > 0 else 0.0
     # The stage cannot go below MUTED: report what is really applied.
@@ -127,7 +129,7 @@ def controls(eq, boost=0.0):
     for key, value in mono.items():
         node, port = key.split(":", 1)
         result.update({f"{node}_{c}:{port}": value for c in CHANNELS})
-    result[LEVEL] = headroom(eq, boost)["effective_preamp"]
+    result[LEVEL] = headroom(eq)["effective_preamp"]
     result["stage:width"] = eq["width"]
     result["stage:gain"] = float(boost)
     return result
@@ -140,7 +142,7 @@ def control_payload(values):
 
 def neutral():
     """Controls that leave the sound as it is: the filter starts and ends here, so being linked in
-    or out of the playback path is inaudible apart from its 1.6 ms delay."""
+    or out of the playback path is inaudible apart from its 3 ms delay."""
     return controls(flat_eq())
 
 
@@ -212,4 +214,10 @@ def read_controls(node):
 def same_controls(actual, expected):
     # pw-dump prints SPA floats with six decimal places. Account for half a
     # final decimal unit, especially for small linear preamp multipliers.
-    return all(k in actual and math.isclose(actual[k], v, rel_tol=2e-5, abs_tol=5.1e-7) for k, v in expected.items())
+    close = lambda a, v: math.isclose(a, v, rel_tol=2e-5, abs_tol=5.1e-7)
+    # PipeWire clamps every filter's Freq to the graph's sample rate (1.6.8): at 44.1 kHz a 48 kHz shelf reads
+    # back as 44100 Hz, the same sound, as both are above Nyquist. One rate for all, and only a real graph rate.
+    rate = min((actual[k] for k, v in expected.items() if k.endswith(":Freq") and k in actual and actual[k] < v
+                and not close(actual[k], v)), default=math.inf)
+    rate = rate if rate in RATES else math.inf
+    return all(k in actual and close(actual[k], min(v, rate) if k.endswith(":Freq") else v) for k, v in expected.items())
