@@ -13,7 +13,7 @@ archive has not been installed on the device.
 
 The public update is numbered 1.1.0. The test device still runs the internal
 build 1.1.1, which the in-plugin updater treats as newer, so install 1.1.0 there
-from the ZIP (Decky → Developer → Install Plugin from ZIP).
+from the ZIP (Decky Settings → General: Developer mode, then Developer → Install Plugin from ZIP).
 
 - `npm run check` (type checking, Python and UI tests, production build and
   packaging) passes locally and in CI; POSIX-only tests are skipped on Windows
@@ -23,11 +23,11 @@ from the ZIP (Decky → Developer → Install Plugin from ZIP).
   WirePlumber does not insert the filter, readback and rollback after failed or
   interrupted writes, suspended-filter writes, ramped level changes, the
   combined-response headroom (checked against a dense brute-force scan and
-  replayed by the frontend), the +15 dB manual cap, settings recovery, deferred
+  replayed by the frontend), settings recovery, deferred
   draft saving, and DeckyEQ 1.0 journal recovery that never blocks EQ.
-- The panel was rebuilt as a main screen (EQ switch, preset, volume boost, bass,
+- The panel was rebuilt as a main screen (EQ switch, volume boost, preset, bass,
   treble, stereo width) with
-  rows opening Equalizer bands, Presets, Output and level, and About. UI tests
+  rows opening Equalizer, Presets, Output, and About. UI tests
   cover navigation, B to go back and focus hand-off, the name dialog (refused
   names reopen it), toasts that do not repeat on remount, preset actions, band
   editing and selections made while QAM is hidden; the browser preview was
@@ -71,13 +71,17 @@ from the ZIP (Decky → Developer → Install Plugin from ZIP).
   the limiter's detector now sees peaks between samples (4x oversampled), so a
   12 kHz tone at 45 degrees with +6 dB boost, whose samples sat at -4.10 dBFS,
   peaked at -1.08 dBTP (8x-oversampled measurement); boosted bass THD 0.01% at
-  70 Hz, 0.00% at 40 Hz; allowance now 3 dB; all 195 controls confirmed; CPU while
+  70 Hz, 0.00% at 40 Hz; allowance then 3 dB (back to 6 dB after the listening test below); all 195 controls confirmed; CPU while
   playing 2.0% of one core. The plugin's neutral start/stop (filter linked in and
   out at flat, then stepped to the settings) needs a listening check in Game Mode.
 - Checked on the device (below): routing, DSP level, untouched session, crash
   behaviour, CPU (0% idle, 1.8% of one core while playing) and the Game Mode
   basics. Still open: headphone and Bluetooth transitions, suspend/resume and a
   PipeWire restart.
+
+The sections below record earlier builds as they were tested then. UI they name, such
+as the View dropdown, the advanced band page, **Live EQ** or the auto-headroom note, has
+since been replaced by the panel described in [USAGE.md](USAGE.md).
 
 ## Smart filter checks on the Legion Go 2 (2026-10-22)
 
@@ -110,7 +114,7 @@ with the backend started directly (Decky installation of this build still pendin
 
 Installed through Decky (`DeckyEQ 1.1.0 loaded ... audio=active`, also after a
 reboot) and checked by the user in Game Mode: the panel loads, enabling EQ shows
-**Live equalizer**, Steam's output list shows **DeckyEQ** next to the speaker,
+**Live EQ**, Steam's output list shows **DeckyEQ** next to the speaker,
 bass and treble changes are audible, the auto-headroom note appears, and the
 volume buttons behave normally. Previous plugin kept as a backup on the device.
 
@@ -250,10 +254,10 @@ headphone transitions, power use and suspend/resume remain to be checked:
 2. Install the ZIP; verify that a stock system meets the reported tool requirements.
 3. Enable EQ and check the live child command line, process UID, owned sink and
    routing of a game that was already playing. Confirm no feedback loop.
-4. Change bass, treble, each band, frequency and Q. Verify actual PipeWire control
+4. Change bass, treble, each band's gain, and in full screen its Q and filter type. Verify actual PipeWire control
    readback and audible behavior, including rapid slider drags and no graph restart.
 5. Save, switch and export presets; import the same file and confirm equal controls.
-6. Repeat at quiet and normal listening levels, with headroom enabled. Evaluate
+6. Repeat at quiet and normal listening levels. Evaluate
    transition clicks, latency and CPU use without assuming Windows parity.
 7. Close/reopen QAM, restart Decky, suspend/resume and restart PipeWire. Confirm
    truthful status and recovery of the most recent draft and selected preset.
@@ -263,5 +267,10 @@ headphone transitions, power use and suspend/resume remain to be checked:
 9. Disable/unload/uninstall and kill Decky while a game is playing. Verify audio
    continues on the output at the same volume, the default output is unchanged
    and no DeckyEQ process or sink remains.
+
+10. Per-game sound is not yet validated on hardware: start a game with its own sound,
+    leave the game, return to it, and suspend/resume while it runs. Check that
+    `Router.MainRunningApp` reports the right game (including non-Steam shortcuts and the
+    overlay) and that each switch sounds clean.
 
 Treat any failed check as a defect to resolve before publishing a verified release.

@@ -1,10 +1,10 @@
 name: Release DeckyEQ
-# Push a tag such as v1.1.0. CI builds and tests the ZIP without write access, attests where it
+# Push a tag such as 1.1.0 (no "v", like the other plugins). CI builds and tests the ZIP without write access, attests where it
 # was built, and creates a DRAFT release. Publish the draft after the hardware checks in
 # docs/VALIDATION.md; the in-plugin updater only sees published releases.
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["*.*.*"]
 permissions:
   contents: read
 jobs:
@@ -23,7 +23,7 @@ jobs:
       # No dependency install scripts run, except esbuild's binary check needed by Vitest.
       - run: npm ci --ignore-scripts && npm rebuild esbuild
       - name: Tag must match the plugin version
-        run: test "v$(node -p "require('./plugin.json').version")" = "$GITHUB_REF_NAME"
+        run: test "$(node -p "require('./plugin.json').version")" = "$GITHUB_REF_NAME"
       - run: npm run check
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -48,4 +48,4 @@ jobs:
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --draft --repo "$GITHUB_REPOSITORY" --title "DeckyEQ $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --verify-tag --draft --repo "$GITHUB_REPOSITORY" --title "DeckyEQ $GITHUB_REF_NAME" --generate-notes

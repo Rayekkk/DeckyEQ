@@ -1,4 +1,4 @@
-# Legion Go S · Original
+# Legion Go S
 
 Author of the community settings: **GAZuOOT**. Verified against the original
 download and native PipeWire 1.6.8 on Legion Go 2 on 2026-09-07.
@@ -8,9 +8,9 @@ download and native PipeWire 1.6.8 on Legion Go 2 on 2026-09-07.
 - [PipeWire filter-chain documentation](https://pipewire.pages.freedesktop.org/pipewire/page_module_filter_chain.html)
 - [PipeWire 1.6.8 biquad implementation](https://github.com/PipeWire/pipewire/blob/1.6.8/spa/plugins/audioconvert/biquad.c)
 
-Choose **Legion Go S · Original** from the plugin's preset dropdown. It is built
+Choose **Legion Go S** from the plugin's preset dropdown. It is built
 in; no import or extra dependency is needed. Edit it live and choose **Save as
-new preset** to keep your version. The original remains available. A standalone
+new…** to keep your version. The original remains available. A standalone
 DeckyEQ export is included at `presets/legion-go-s-original.json`.
 
 ## Exact mapping
@@ -32,7 +32,8 @@ convolution impulse, compressor or limiter. Every filter uses Q = 1.
 | High shelf | 80000 Hz | 48000 Hz | 0 dB | Band 9, high shelf |
 | Bell | 16000 Hz | 16000 Hz | 0 dB | Band 10 |
 
-Bass and treble tone sliders are both 0 dB. Automatic headroom is **off**.
+Bass and treble tone sliders are both 0 dB. Automatic headroom, always on since 1.1,
+lowers its level by about 0.6 dB; the limiter catches the rest.
 The source's high shelf at 0 Hz is a constant +8 dB gain, so DeckyEQ represents
 it with a linear input multiplier of 10^(8/20), approximately 2.511886.
 
@@ -46,14 +47,14 @@ keeping the same native parameters preserves the corresponding behavior.
 In practice the active EQ reduces the lowest bass, boosts 125/250 Hz, cuts
 500 Hz and 2 kHz, lowers the region above 1 kHz and adds input gain. Shelves at
 Q = 1 have some resonance, so this is not a set of hard frequency boundaries.
-The extra gain can produce clipping. Reducing input gain or enabling headroom
-changes the original tuning level and is available as a user adjustment.
+The extra gain would clip without the limiter, which now holds it at -1 dBFS.
+Lowering **Input level** trades loudness for less limiting.
 
 This reproduces the parsed filter settings and intended DSP response, subject
 to floating-point rounding. It is not a claim of identical PCM bytes, Windows
 audio processing, or identical acoustic results on the different Go 2 speakers.
 PipeWire routing, hardware mixer levels and source volumes remain governed by
-DeckyEQ and the user's audio session.
+the user's audio session; DeckyEQ does not touch them.
 
 ## Source identity
 

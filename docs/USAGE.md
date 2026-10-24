@@ -5,24 +5,31 @@
 ## Installation and first use
 
 1. Install the release `DeckyEQ-<version>.zip` (or `artifacts/DeckyEQ-<version>.zip` from `npm run package`) using Decky's local ZIP installation
-   option in its developer settings.
+   option: turn on Developer mode in Decky Settings → General, then Developer → Install Plugin from ZIP.
 2. Open **DeckyEQ** in the quick-access menu. Enable **Enable EQ**. The first
    activation selects the current speaker output if possible. If no suitable
-   speaker output is found, choose an output under **Output and level**.
-3. Play familiar audio and adjust **Bass**, **Treble** and, under **Equalizer
-   bands**, the ten band sliders.
-4. Open **Presets**, choose **Save as new…** and enter a name.
+   speaker output is found, choose an output under **Output**.
+3. Play familiar audio and adjust **Bass**, **Treble**, the curve or, under
+   **Equalizer**, the band sliders.
+4. Choose **Save as new…** in **Presets** (on the main screen it appears for an edited built-in preset) and enter a name.
 
-The main screen holds **Enable EQ**, **Preset**, **Volume boost**, **Bass**, **Treble**
-and **Stereo width**. Below
-them, rows with a one-line summary open **Equalizer bands**, **Presets**,
-**Output and level** and **About**; each page starts with a back button that
+The main screen holds **Enable EQ**, **Volume boost** (global, so it sits above the
+preset), **Preset**, the equalizer curve, **Bass**, **Treble** and **Stereo width**; while the sound has unsaved changes,
+**Save** (**Save as new…** for a built-in preset) and **Discard** follow them. Below
+them, rows with a one-line summary open **Equalizer**, **Presets**,
+**Output** and **About**; each page starts with a back button that
 takes the D-pad focus, **B** goes back one page, and going back returns focus to
 the row you came from.
-Technical facts and rare actions are under **Show details**. Outcomes such as
-an export path appear as a Steam toast; errors stay on the page that caused them,
-and a failure of an action confirmed in a dialog (which hides the menu) is also
-toasted. A refused preset name reopens the dialog with the typed name and reason.
+**Equalizer** holds **Edit full screen**, the band sliders, **Input level**, **Five
+sliders** and **Reset to flat**; **Output** holds **Apply EQ to** and **Speakers only**.
+While EQ is not live (off, waiting, connecting, standby, bypassed or paused), **Equalizer**,
+**Presets** and **Output** start with a note that says why, so edits you cannot hear
+are explained. Technical facts and rare actions are under **Show details** (in **Presets**,
+**Show import or export**). Outcomes such as
+an export path (from the home folder, such as `Documents/DeckyEQ/Flat.json`) appear as a Steam toast; errors stay on the page that caused them,
+and are also toasted, since the page may be scrolled away or hidden by a dialog: every failed
+action, and every slider edit the backend refuses, once. A preset name the backend refuses
+reopens the dialog with the typed name and reason; any other refusal there is toasted.
 The plugin keeps the panel mounted while Steam opens native dropdown menus,
 so the open page and band selections survive the temporary QAM hide.
 
@@ -53,16 +60,64 @@ present, a restore the device does not confirm is dropped instead of retried, it
 never blocks EQ, and an unreadable journal is
 set aside instead of blocking EQ.
 
+## Curve editor
+
+The curve is the combined response of all bands and both tone shelves (without the
+input level), on a 20 Hz – 20 kHz log axis from -15 to +15 dB. The same graph sits on
+the main screen, and fills a Steam dialog from **Edit full screen** on **Equalizer**. The
+dots move only up and down (gain); the frequency never changes on the graph. Touch: drag a
+dot; it moves as far as your finger does, so touching it never makes it jump, and a tap does
+not start controller editing. Controller: move to the curve and press **A** to edit, **B** to
+finish. While editing, **D-pad ←/→** choose the band (or pair), **↑/↓** change its gain in
+0.5 dB steps and **X** sets it flat; in full screen **LT/RT** also make the band wider or
+narrower and **Y** changes its filter type (bell, low shelf, high shelf); a pair, and a shelf
+that acts as a level (below), have only a gain, and a flat placeholder (below) gets width and
+type once it has a gain. Steam's button hints at the bottom of the
+screen list the same. Above the graph, the menu shows the chosen band's frequency and gain,
+while editing also its filter type and Q; full screen adds the band's number. Edits go through the
+same queue as the sliders.
+
+Every preset controls the same ten bands, named the same everywhere: 31.5 Hz, 63 Hz,
+125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 8 kHz and 16 kHz (five pairs of them with
+**Five sliders**). A band's frequency cannot be changed in the panel. A band slightly off its
+usual frequency (the Go S file's 31.25 Hz, nearest 31.5 Hz on a log scale) moves there when you
+edit it. A band nearer another band's usual frequency than its own (moved in DeckyEQ 1.0, or
+imported) keeps its frequency: its slider, dot and reading name it by that frequency, and
+editing changes its gain (in full screen also width and type), never its frequency. The Go S preset keeps its original sound: its 31.25 Hz low
+shelf and 1 kHz high shelf are bands 1 and 6, and its 0 Hz and 40/48 kHz placeholders,
+which do nothing, appear as flat 63 Hz, 4 kHz and 8 kHz bands that become real only when
+you give them a gain (a placeholder left flat is not an edit). A shelf at the edge of 20 Hz – 20 kHz
+or beyond that acts as a level (a low shelf at 20 kHz or above, a high shelf at 20 Hz or below,
+from an old import) keeps its own frequency and name, also at 0 dB; only its gain can be changed.
+
+The full screen editor adds the **Preset** list, **Five sliders**, a status line and
+**Save** or **Save as new…**, **Discard** and **Done**. Like the main screen's row, Save
+and Discard use the **Presets** actions.
+
+**Five sliders** is a panel preference of this device (stored in the browser's local
+storage, never in a preset or `settings.json`). Each slider, and each dot on the curve,
+covers a pair of neighbouring bands (1+2, 3+4, ...); it shows the average gain of the
+pair's two bands, rounded to 0.5 dB (halves away from 0), and moving it moves both bands by the same step
+(each within ±12 dB; when one stops at the limit, the other makes up the rest, so the pair
+shows the gain you chose); **X** on the curve sets both flat. Switching the preference never
+changes the sound, and the chosen band becomes its pair (a pair becomes its first band).
+
 ## Presets and drafts
 
 Slider edits are applied immediately and automatically stored as the current
-draft. **Save changes** commits the draft to that library entry.
-**Save as new…** creates an independent copy. Switching away from an edited
-draft asks before replacing it; **Discard changes** restores the original.
+draft. **Save** commits the draft to that library entry.
+**Save as new…** creates an independent copy; its name field starts with the current
+preset's name, and a repeated name gets " (2)". Switching away from an edited
+draft asks before replacing it; **Discard** restores the original.
 Built-in presets cannot be overwritten, renamed or deleted. Their settings can
 be edited live and saved as a new user preset.
 
-**Legion Go S · Original** is available directly in **Preset**. It
+Two built-in starting points are simple shapes on the default bands (Q 1.4, all bells):
+**Clear voices**, "Brings dialogue forward: a little less boom, more presence around 2–4 kHz."
+(125/250 Hz -2 dB, 1 kHz +1, 2/4 kHz +3, 8 kHz +1), and **More bass**, "Fuller low end where
+small speakers can still play it, around 100–250 Hz." (63 Hz +2, 125 Hz +5, 250 Hz +3).
+
+**Legion Go S** is available directly in **Preset**. It
 reproduces the native filters actually parsed from GAZuOOT's community file,
 including its +8 dB input boost and unusual frequency values; the limiter keeps it
 from clipping. Reduce **Input level** if it sounds squashed, and save your own
@@ -70,11 +125,18 @@ adjusted version.
 See [the exact settings and source notes](GO_S_PRESET.md). This is a Go S
 community tuning preset, not a measured calibration for Go 2.
 
+**Legion Go 2** is the owner's speaker tuning for the Legion Go 2, made by ear from the
+Legion Go S preset: standard bands (31.5 Hz low shelf -3.5 dB, 63 Hz +1.5, 125/250 Hz +4.5,
+500 Hz -4, 1 kHz high shelf -4.5, 2 kHz -4, 4 kHz +1.5, 8/16 kHz +1), Bass +2.5 dB, Treble
++1.5 dB, Stereo width 160% and Input level +8 dB. It is the only preset that also sets the
+global **Volume boost** (9 dB) when chosen; other presets leave the boost as it is.
+
 **Export this sound** includes the current draft, even if it has not been
-saved to a named preset. **Export all presets** includes the saved user
+saved to a named preset. **Export your presets** includes the saved user
 presets, not the draft. An empty library exports Flat. Default exports go to
 `~/Documents/DeckyEQ/`; a second export with the same name gets a numeric suffix
-and never overwrites an existing file. **Show details** offers another export folder.
+and never overwrites an existing file. All of these sit under **Show import or export**,
+which also offers another export folder.
 
 Import uses Decky's file picker. Place imported files in your home directory,
 for example Downloads. Only bounded UTF-8 `.json` files inside the user's home
@@ -82,6 +144,21 @@ are accepted. Maximum file size: 256 KiB. Import validates every entry before
 adding anything; it does not overwrite presets or automatically change playback.
 Names that collide get a suffix. Files from EasyEffects, APO or other equalizers
 are not silently approximated; this version accepts the DeckyEQ schema only.
+
+**Own sound for <game>** appears on the main screen while a game runs (the panel
+reads Steam's running app every 2 seconds, also while the QAM is closed). Turned on,
+the game gets a copy of the sound playing now, and from then on preset choices and
+slider edits apply to that game only. The everyday sound is kept aside and returns when
+the game closes; the game's sound returns when it runs again, changed live like a
+preset switch. If that switch fails, a message says so and the panel retries; turning
+the toggle on again uses the game's saved sound, never overwrites it. Turning the
+toggle off, or **Forget** under **Presets › Games with their own sound**, deletes the
+game's sound and goes back to the everyday one. Deleting a preset keeps the sounds of
+games that are not running as edited Flat; the sound playing now returns to Flat.
+Volume boost, the output and speakers-only bypass are global. Up to 200 games are
+kept; they live in `settings.json` (`games`, `scope`, `outside`). After a crash or
+reboot DeckyEQ starts with the everyday sound and switches once the panel sees a game.
+DeckyEQ 1.0 reads the file without the game sounds, as long as it is under 512 KiB. Exports and imports carry presets only, never game assignments.
 
 `schemas/preset-v2.schema.json` describes the current exchange format. Version 1
 files and settings are migrated automatically, retaining all previous values,
@@ -94,7 +171,7 @@ paths and runtime preferences are deliberately excluded from shared presets.
 ## Headroom, limiter and tone controls
 
 The two tone sliders are additional shelves; their effects add to the ten bands.
-The chart shows **individual band gains**, not a measured speaker response.
+The curve shows their combined response, not a measured speaker response.
 
 After the filters, both channels pass DeckyEQ's own stereo stage, a small LADSPA
 plugin shipped as `bin/deckyeq_dsp.so` (source: `native/deckyeq_dsp.c`). It applies
@@ -106,14 +183,15 @@ bands add up flat; only the phase of the lowest notes turns), and the bass gets 
 limiter 3 dB below the ceiling, so a loud bass note no longer turns down voices and the
 rest: with a single limiter a 1 kHz tone ducked by up to 7.8 dB on every bass hit at
 +11 dB input, with two bands by under 2.5 dB (the measurement's own floor). A second
-limiter on the whole signal then guarantees a -1 dBFS ceiling that also covers peaks
-between samples (its detector looks at the signal 4x oversampled). Each limiter looks
+limiter on the whole signal then holds every sample at -1 dBFS and catches most peaks
+between samples too (its detector looks at the signal 4x oversampled; very bright,
+already clipped material can still overshoot between samples by up to about 2.5 dB, so past 0 dBTP). Each limiter looks
 1.5 ms ahead, holds for 25 ms so it does not trace each cycle of a low note (half a
 cycle at 20 Hz) and releases over 100 ms; together they delay the sound by about 3 ms.
 Both always run; below their ceilings they change nothing. Very large boosts limited
 this way can sound compressed; automatic headroom prevents that (below). Turning EQ
-on starts the filter neutral (flat, 0 dB) and moves it to your settings in steps;
-turning it off moves it back to neutral before it ends. WirePlumber linking the filter
+on starts the filter neutral (flat, 0 dB) at a lowered level, writes your settings in
+one step and then raises the level; turning it off moves it back to neutral before it ends. WirePlumber linking the filter
 in or out of the playback path is therefore inaudible apart from its 3 ms delay.
 The volume of the Legion Go 2 speakers is set in hardware after the digital signal,
 so a boost that crosses full scale would clip at any volume; the limiter turns such
@@ -147,13 +225,14 @@ lowered input level still counts as room. The panel shows the current compensati
 and widening; it made boosted presets far quieter than no EQ at all and was removed.)
 Neither is a loudness normalizer or a guarantee against physical speaker distortion.
 
-Automatic headroom is always on (an earlier build had a switch for it, which changed
-about 0.6 dB on the Go S preset and only confused). Presets still carry the old
-`auto_headroom` field for compatibility; it is no longer read.
+Upgrading from 1.0: the Automatic headroom switch is gone and headroom is always automatic.
+It now lowers the level only for EQ boosts above 6 dB, so most presets play louder than in 1.0;
+presets that had the switch off may play slightly quieter (Go S: about 0.6 dB).
+Presets still carry the old `auto_headroom` field for compatibility; it is no longer read.
 
-The runtime lowers the input level before altering filters, makes large filter
-gain changes in several steps, reads the filters back, and only then raises the
-input level; the stage glides each level change. The frontend coalesces fast drags; all backend transactions
+The runtime lowers the input level before altering filters, writes the filters in
+one step (PipeWire resets a filter's state on every write, so steps would only add
+clicks), reads them back, and only then raises the input level; the stage glides each level change. The frontend coalesces fast drags; all backend transactions
 are serialized. While audio plays, every change is read back from PipeWire before
 it is confirmed; a failed or interrupted write makes the next change read the
 filter afresh, so a rollback really restores the previous sound. Slider edits
@@ -172,10 +251,9 @@ nonzero gain. The fixed graph has 32 filters per channel (with the two tone
 shelves) and the stage. Type changes, also from switching presets, are therefore
 live control updates: audio never restarts and never plays without EQ. (One filter
 per slot would save about 1% of a core but needs a rebuild for every type change.)
-Large frequency jumps are written in steps of half an octave or less.
 A shelf's Q is capped at 1.4: above it the shelf resonates, so a "cut" boosts near its
 corner. Imported presets are capped the same way.
-The frequency slider covers 20 Hz – 20 kHz. PipeWire's single-precision
+Imported presets keep their frequencies until a band is edited in the panel. PipeWire's single-precision
 biquads become unstable below about 6 Hz and just under Nyquist, so values
 between 0 and 20 Hz snap to 20 Hz and values between 20 and 24 kHz snap to
 20 kHz, including in imported presets and saved settings. Exactly 0 Hz and
@@ -188,22 +266,30 @@ Nyquist has no effect.
 **Speakers only** is enabled initially. It checks the actual selected
 output's active port; a missing/unknown port is bypassed rather than guessed.
 Turn it off if you deliberately want to EQ a selected headset, USB device or
-HDMI output. The monitor listens to PulseAudio events (`pactl subscribe`) and
-reacts to output, card and server changes about 0.15 seconds after a burst of
-events settles; changes of DeckyEQ's own sink are ignored. Without events it only
+HDMI output. The monitor listens to PulseAudio events (`pactl subscribe`, run with
+`LC_ALL=C`): a card change (headphones plugged in) and the first change of the selected
+output are handled at once, further changes in a burst about 0.1 seconds after the last one
+(a held volume key),
+and other changes about 0.15 seconds after a burst settles (at most 1 second); changes
+of DeckyEQ's own sink are ignored. Without events it only
 re-reads the filter's controls every 15 seconds while EQ is active; if the event
 stream is unavailable it falls back to checking every 1.5 seconds.
-A tool that does not answer (for example `pw-dump` timing out while a game loads)
-leaves the filter playing; only three such misses in a row, or a real mismatch, pause
-EQ. If PipeWire restarts under the filter, DeckyEQ builds it again without an error.
+At boot, until the audio session first answers, the panel shows only
+**Connecting to …**. A tool that does not answer (for example `pw-dump` timing out
+while a game loads) leaves the filter playing; only three such misses in a row, or a real mismatch, pause
+EQ. If PipeWire restarts under the filter, DeckyEQ builds it again without an error, and
+waits quietly if WirePlumber takes a while to link it again. A filter that ends by itself
+within 10 seconds of starting shows **The equalizer stopped: …** and is retried with the backoff below.
 After a failure, retries wait 8, 16, 32 and then 60 seconds, and a filter that keeps
 failing keeps that backoff until it has run for a minute. This is a software polling
 guard, not an instantaneous hardware interlock; there can be a short transition
 before bypass. `pactl subscribe` and the filter both run through `worker.py`, so they
 end with the plugin even if Decky is killed.
 
-Steam's output choice is never overridden. Unplugging the target pauses EQ;
-reconnecting it resumes with the saved settings.
+Steam's output choice is never overridden, with one exception: if Steam plays to the
+**DeckyEQ** node itself, stopping or unloading hands Steam's output back to the selected
+output instead of leaving it to WirePlumber. Unplugging the target, also while the
+filter is starting, waits for it; reconnecting it resumes with the saved settings.
 
 Turning **Enable EQ** off or unloading the plugin only terminates the owned filter
 process, while keeping the preset library.
@@ -213,11 +299,14 @@ that it does not own blocks activation with an explanatory error.
 
 ## Plugin updates
 
-**About → Updates** uses the release flow shared with SpotiDeck and Legion
-Go 2 Companion. It checks `Rayekkk/DeckyEQ` only when requested, then downloads a
-newer stable `DeckyEQ-X.Y.Z.zip` uploaded by the release workflow (`github-actions[bot]`)
-with a matching GitHub asset digest; a hand-uploaded ZIP is never offered. Installation
-remains a separate action in Decky's Developer settings. A repository with no
+**About → Updates** checks `Rayekkk/DeckyEQ` only when requested, then downloads a
+newer stable `DeckyEQ-X.Y.Z.zip` uploaded by a GitHub Actions run in this repository
+(`github-actions[bot]`) with a matching GitHub asset digest; a hand-uploaded ZIP is never
+offered. Anyone with push access can start such a run, so the repository should use tag
+protection;
+`gh attestation verify` shows which workflow built a file. Installation
+remains a separate action in Decky's Developer settings (turn on Developer mode in
+Decky Settings → General first). A repository with no
 release is a normal state. Downloads do not require extra Python packages.
 
 Requests run outside the audio event loop. Frontend progress survives changing
@@ -249,7 +338,7 @@ Shared limits (band frequencies, value ranges, the boost cap) live in
 `tests/fixtures/` holds data generated by the Python backend that the frontend
 tests replay: a real status snapshot and headroom/frequency parity vectors.
 Regenerate them after an intended change with `DECKYEQ_UPDATE_FIXTURES=1 npm test`
-(PowerShell: `$env:DECKYEQ_UPDATE_FIXTURES=1; npm test`). `npm run typecheck` checks
+(PowerShell: `$env:DECKYEQ_UPDATE_FIXTURES=1; npm test; Remove-Item Env:DECKYEQ_UPDATE_FIXTURES`). `npm run typecheck` checks
 the tests' types too.
 
 ### Releases
@@ -277,7 +366,9 @@ See [VALIDATION.md](VALIDATION.md) for the local evidence and remaining acceptan
 - `deckyeq/service.py`: serialized transactions, rollback, monitoring and RPC state.
 - `main.py`: minimal Decky entry point with unprivileged lifecycle ownership.
 - `src/controller.ts`: one frontend write queue retained across QAM remounts.
-- `src/App.tsx`: native Decky controls and preset management.
+- `src/App.tsx`: native Decky controls, preset management and the full-screen editor dialog.
+- `src/editor.tsx`: the curve graph (touch and controller editing).
+- `src/pairs.ts`: five-slider pairs and the per-device five-slider preference.
 - `deckyeq/updates.py` and `src/updates.tsx`: verified release downloads and About UI.
 
 The core engine has no dependency on the Decky frontend, so a future Companion

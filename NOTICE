@@ -15,7 +15,9 @@ as part of DeckyEQ's production bundle. Development-only preview and test
 dependencies are not included in the plugin ZIP.
 
 PipeWire is an existing system component. DeckyEQ distributes configuration
-and a control client, not PipeWire binaries or external audio effect plugins.
+and a control client, not PipeWire binaries or third-party audio effect plugins.
+`bin/deckyeq_dsp.so` is DeckyEQ's own LADSPA stage (level, width, boost and
+limiter), built from `native/deckyeq_dsp.c` under DeckyEQ's BSD 3-Clause license.
 The graph follows the public PipeWire filter-chain API and the upstream
 sink-eq6 example. No Lenovo or Nahimic assets or presets are included.
 
