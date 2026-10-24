@@ -128,6 +128,67 @@ describe("failed writes", () => {
     expect(h.controller.getSnapshot().snapshot!.state.working.bass).toBe(0);
     h.controller.dispose();
   });
+
+  it("says a change was not confirmed only once, not on every later reconnect", async () => {
+    const h = harness(); await h.controller.refresh();
+    vi.mocked(h.transport.perform).mockRejectedValueOnce(new Error("socket closed"));
+    h.controller.edit({ ...flatEQ(), bass: 5 });
+    await h.controller.flush();
+    await h.controller.refresh();
+    expect(h.controller.getSnapshot().error).toContain("not confirmed");
+    vi.mocked(h.transport.status).mockRejectedValueOnce(new Error("gone"));
+    await h.controller.refresh();
+    expect(h.controller.getSnapshot().connected).toBe(false);
+    await h.controller.refresh();
+    expect(h.controller.getSnapshot().connected).toBe(true);
+    expect(h.controller.getSnapshot().error).toBeNull();
+    h.controller.dispose();
+  });
+
+  it("takes the backend's null message as no note", async () => {
+    const h = harness(); await h.controller.refresh();
+    const result: Result = { ok: true, state: structuredClone(h.state), message: null };
+    vi.mocked(h.transport.perform).mockResolvedValueOnce(result);
+    await h.controller.action("save");
+    expect(h.controller.getSnapshot().note).toBeNull();
+    h.controller.dispose();
+  });
+});
+
+describe("refused edits", () => {
+  it("tells the listener once per refused write, not for a lost connection", async () => {
+    const h = harness(); await h.controller.refresh();
+    const refused = vi.fn();
+    h.controller.onEditRejected = refused;
+    vi.mocked(h.transport.perform).mockResolvedValueOnce({ ok: false, error: "Readback failed", state: seed() });
+    h.controller.edit({ ...flatEQ(), bass: 4 });
+    await h.controller.flush();
+    expect(refused).toHaveBeenCalledExactlyOnceWith("Readback failed");
+    await h.controller.refresh();
+    expect(refused).toHaveBeenCalledOnce();  // Polling the same error again does not repeat it.
+    vi.mocked(h.transport.perform).mockRejectedValueOnce(new Error("socket closed"));
+    h.controller.edit({ ...flatEQ(), bass: 5 });
+    await h.controller.flush();
+    expect(refused).toHaveBeenCalledOnce();
+    h.controller.dispose();
+  });
+});
+
+describe("edits during an action", () => {
+  it("ignores a slider edit while an action runs, so two writes are never in flight", async () => {
+    const h = harness(); await h.controller.refresh();
+    const reset = deferred<Result>();
+    vi.mocked(h.transport.perform).mockImplementationOnce(() => reset.promise);
+    const acting = h.controller.action("reset");
+    await vi.waitFor(() => expect(h.transport.perform).toHaveBeenCalledOnce());
+    h.controller.edit({ ...flatEQ(), bass: 5 });
+    expect(h.controller.getSnapshot().snapshot!.state.working.bass).toBe(0);  // Not shown as if it were applied.
+    await h.controller.flush();
+    expect(h.transport.perform).toHaveBeenCalledOnce();
+    reset.resolve({ ok: true, state: structuredClone(h.state) });
+    await acting;
+    h.controller.dispose();
+  });
 });
 
 describe("disconnected actions", () => {
@@ -198,7 +259,7 @@ describe("boost and polling", () => {
     const eq = { ...flatEQ(), bass: 9 };
     h.controller.edit(eq, 6);
     const audio = h.controller.getSnapshot().snapshot!.audio;
-    expect(audio.compensation).toBeCloseTo(headroom(eq, 6).compensation, 6);
+    expect(audio.compensation).toBeCloseTo(headroom(eq).compensation, 6);
     expect(audio.compensation).toBeLessThan(0);  // Updated at once, before the backend answers.
     expect(h.controller.getSnapshot().snapshot!.state.boost).toBe(6);
     h.controller.dispose();
@@ -281,6 +342,25 @@ describe("queue promises (audit mutations)", () => {
     expect(h.transport.perform).toHaveBeenCalledTimes(1);
     expect(h.controller.getSnapshot().snapshot!.state.working.bass).toBe(0);
     expect(h.controller.getSnapshot().error).toBe("Not confirmed");
+    h.controller.dispose();
+  });
+});
+
+describe("export notice", () => {
+  it("names the exported file from the home folder when it is inside it, otherwise in full", async () => {
+    const h = harness(); await h.controller.refresh();
+    for (const [home, path, shown] of [
+      ["/home/deck", "/home/deck/Documents/DeckyEQ/Flat.json", "Documents/DeckyEQ/Flat.json"],
+      ["/home/deck/", "/home/deck/Documents/DeckyEQ/Flat.json", "Documents/DeckyEQ/Flat.json"],
+      ["/home/deck", "/run/media/deck/card/Flat.json", "/run/media/deck/card/Flat.json"],
+      ["/home/deck", "/home/decker/Flat.json", "/home/decker/Flat.json"],  // Starts alike, is not inside.
+      ["", "/home/deck/Flat.json", "/home/deck/Flat.json"],
+    ]) {
+      h.state.home = home;
+      vi.mocked(h.transport.perform).mockResolvedValueOnce({ ok: true, state: structuredClone(h.state), path });
+      await h.controller.action("export");
+      expect(h.controller.getSnapshot().note).toBe(`Exported to ${shown}`);
+    }
     h.controller.dispose();
   });
 });

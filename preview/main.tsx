@@ -6,7 +6,8 @@ import { version } from "../package.json";
 import { PreviewEngine } from "./engine";
 import "./style.css";
 
-const controller = new Controller(new PreviewEngine());
+const engine = new PreviewEngine();
+const controller = new Controller(engine);
 const updates = new UpdateController({
   check: async () => ({ success: true, current_version: version, update_available: false, download_available: false, no_release: true }),
   download: async () => ({ success: false, error: "Downloads are simulated in this preview." }),
@@ -16,7 +17,8 @@ createRoot(document.getElementById("root")!).render(<div className="preview-shel
     <h1>Make it<br /><span>your sound.</span></h1><p>A live equalizer, tone controls and a library of your own presets.</p>
     <div className="preview-caption">UI preview · simulated backend<br />No audio is processed in this browser.</div>
   </aside>
-  <main className="preview-panel"><header><EqualizerIcon /><strong>DeckyEQ</strong><span>UI preview</span></header>
+  <main className="preview-panel"><header><EqualizerIcon /><strong>DeckyEQ</strong><span>UI preview</span>
+    <button onClick={async () => { await engine.setGame(engine.value.game ? "" : "1145360", "Hades"); void controller.refresh(); }}>Simulate game</button></header>
     <App controller={controller} updates={updates} files={{ importFile: async () => "/home/deck/preview.json", exportFolder: async home => home }} />
   </main>
 </div>);

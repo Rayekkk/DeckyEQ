@@ -4,6 +4,7 @@
 import { ButtonItem, Field, PanelSection, PanelSectionRow } from "@decky/ui";
 import { useSyncExternalStore } from "react";
 import { version } from "../package.json";
+import { fromHome } from "./controller";
 
 export interface UpdateCheck {
   success: boolean;
@@ -86,24 +87,26 @@ export class UpdateController {
   }
 }
 
-function statusText(check?: UpdateCheck): [string, string] {
+function statusText(check?: UpdateCheck, failed = false): [string, string] {
   const installed = check?.current_version || version;
-  if (!check) return ["GitHub releases", `Installed version: ${installed}. Check for updates when you need them.`];
-  if (check.no_release) return ["No public release yet", `Installed version: ${installed}. A download will appear after a release is published on GitHub.`];
+  if (!check) return [failed ? "Check failed" : "Not checked yet", `Installed version: ${installed}.`];
+  if (check.no_release) return ["No public release yet", `Installed version: ${installed}.`];
   if (check.update_available) {
-    if (!check.download_available) return ["New release found", `Version ${check.latest_version}: ${check.error || "no verified installation ZIP yet"}. Check again later.`];
+    if (!check.download_available) return ["New release found", `Version ${check.latest_version}: ${check.error?.replace(/\.$/, "") || "no verified installation ZIP yet"}. Check again later.`];
     const size = check.size ? ` (${(check.size / 1048576).toFixed(1)} MB)` : "";
-    return ["Update available", `Version ${check.latest_version}${size}. Download the release ZIP from GitHub.`];
+    return ["Update available", `Version ${check.latest_version}${size}.`];
   }
   return check.latest_version === installed ? ["Up to date", `Version ${installed} is the latest public release.`]
     : ["No newer release", `Installed: ${installed}. Latest public release: ${check.latest_version}.`];
 }
 
-export function UpdateSection({ controller }: { controller: UpdateController }) {
+/** `home` shortens the ZIP's path to ~/…: the full path names the user. */
+export function UpdateSection({ controller, home = "" }: { controller: UpdateController; home?: string }) {
   const view = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const downloaded = !!view.check?.latest_version && view.download?.version === view.check.latest_version;
-  const [label, description] = downloaded
-    ? ["Ready to install", `Version ${view.check!.latest_version} is saved; see the file below.`] : statusText(view.check);
+  // No result with an error: the check itself failed (a failed download keeps the check).
+  const [label, description]: [string, string?] = downloaded ? ["Ready to install"] : statusText(view.check, !!view.error);
+  const path = view.download?.path, relative = path && fromHome(path, home);
   return <PanelSection title="Updates">
     <PanelSectionRow><Field focusable label={label} description={description} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" childrenContainerWidth="max" disabled={view.busy !== null}
@@ -118,8 +121,8 @@ export function UpdateSection({ controller }: { controller: UpdateController }) 
     </PanelSectionRow>}
     {view.error && <PanelSectionRow><Field focusable label="Could not complete" description={<div role="alert">{view.error}</div>} /></PanelSectionRow>}
     {view.download?.path && <PanelSectionRow><Field focusable label={`Version ${view.download.version} downloaded`}
-      description={<><div style={{ overflowWrap: "anywhere" }}>{view.download.path}</div><div style={{ marginTop: 6 }}>
-        Install the ZIP through Decky Settings → Developer → Install Plugin from ZIP.
+      description={<><div style={{ overflowWrap: "anywhere" }}>{relative === path ? path : `~/${relative}`}</div><div style={{ marginTop: 6 }}>
+        Turn on Developer mode in Decky Settings → General, then Developer → Install Plugin from ZIP.
       </div></>} /></PanelSectionRow>}
   </PanelSection>;
 }

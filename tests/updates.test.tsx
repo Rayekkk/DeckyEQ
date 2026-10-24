@@ -48,7 +48,7 @@ it("downloads the selected version once and retains progress across page remount
   expect(screen.getByText("Downloading ZIP…")).toBeTruthy();
   await act(async () => pending.resolve({ success: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }));
   expect(screen.getByText("/home/deck/Downloads/DeckyEQ-1.0.1.zip")).toBeTruthy();
-  expect(screen.getByText(/Install the ZIP through Decky/)).toBeTruthy();
+  expect(screen.getByText(/Turn on Developer mode in Decky Settings → General, then Developer → Install Plugin from ZIP\./)).toBeTruthy();
   expect(screen.getByText("Ready to install")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Download 1.0.1" })).toBeNull();
   reopened.unmount();
@@ -66,7 +66,7 @@ it("does not offer a download for equal, older or unverifiable releases", async 
   await click("Check for updates");
   expect(screen.getByText("No newer release")).toBeTruthy();
   await click("Check for updates");
-  expect(screen.getByText(/Missing trusted digest\./)).toBeTruthy();  // A note about the release, not a failure.
+  expect(screen.getByText("Version 1.0.1: Missing trusted digest. Check again later.")).toBeTruthy();  // A note, not a failure; one full stop.
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByRole("button", { name: /Download/ })).toBeNull();
 });
@@ -130,4 +130,33 @@ it("drops an old offer when a later check fails", async () => {
   await click("Check for updates");
   expect(screen.getByRole("alert").textContent).toBe("rate limit");
   expect(screen.queryByRole("button", { name: /Download/ })).toBeNull();
+});
+
+it("describes each state in a line, without repeating what the button says", async () => {
+  const client = { check: vi.fn().mockResolvedValueOnce({ ...available, no_release: true, update_available: false, download_available: false })
+    .mockResolvedValueOnce(available), download: vi.fn().mockResolvedValue({ success: true, version: "1.0.1", path: "/Downloads/DeckyEQ-1.0.1.zip" }) };
+  setup(client);
+  expect(screen.getByText("Not checked yet")).toBeTruthy();
+  expect(screen.getByText(`Installed version: ${version}.`)).toBeTruthy();
+  await click("Check for updates");
+  expect(screen.getByText("No public release yet")).toBeTruthy();
+  expect(screen.getByText("Installed version: 1.0.0.")).toBeTruthy();
+  await click("Check for updates");
+  expect(screen.getByText("Version 1.0.1 (2.0 MB).")).toBeTruthy();
+  await click("Download 1.0.1");
+  expect(screen.getByText("Ready to install").closest(".preview-field")!.querySelector("small")).toBeNull();  // The file below says the rest.
+});
+
+it("says the check failed after a failed check, and shows the ZIP from the home folder", async () => {
+  const client = { check: vi.fn().mockRejectedValueOnce(new Error("rate limit")).mockResolvedValue(available),
+    download: vi.fn().mockResolvedValue({ success: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }) };
+  const controller = new UpdateController(client);
+  sessions.push(controller);
+  render(<UpdateSection controller={controller} home="/home/deck" />);
+  await click("Check for updates");
+  expect(screen.getByText("Check failed")).toBeTruthy();
+  expect(screen.queryByText("Not checked yet")).toBeNull();
+  await click("Check for updates");
+  await click("Download 1.0.1");
+  expect(screen.getByText("~/Downloads/DeckyEQ-1.0.1.zip")).toBeTruthy();  // Not the user's name.
 });

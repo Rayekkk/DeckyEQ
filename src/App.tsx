@@ -1,17 +1,19 @@
-import { ComponentProps, ReactNode, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { ButtonItem, ConfirmModal, DropdownItem, Field, Focusable, PanelSection,
-  PanelSectionRow, showModal, SliderField, TextField, ToggleField } from "@decky/ui";
+import { ComponentProps, ReactElement, ReactNode, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { ButtonItem, ConfirmModal, DialogBody, DialogButton, DialogFooter, DialogHeader, DropdownItem, Field, Focusable,
+  ModalRoot, PanelSection, PanelSectionRow, showModal, ShowModalProps, SliderField, TextField, ToggleField } from "@decky/ui";
 import { Controller } from "./controller";
-import { Band, cloneEQ, db, EQ, FilterType, formatHz, limits, safeFrequency, Snapshot } from "./types";
+import { CurveGraph } from "./editor";
+import { bandHz, pairs, setFiveBands, shown, useFiveBands, withBand, withPairGain } from "./pairs";
+import { Band, cloneEQ, db, EQ, formatHz, limits, Output, Preset, Snapshot } from "./types";
 import { UpdateController, UpdateSection } from "./updates";
 
-const [freqMin, freqMax] = limits.frequency, [stableMin, stableMax] = limits.stable_frequency;
 const POLL_MS = 1800;  // Status refresh while the panel is visible.
 const phases: Record<string, string> = { active: "Live", standby: "Standby", off: "EQ off", bypassed: "Bypassed",
-  waiting: "Waiting for output", error: "Paused", unavailable: "Unavailable" };
-const filterTypes: { data: FilterType; label: string }[] = [
-  { data: "peaking", label: "Bell" }, { data: "lowshelf", label: "Low shelf" }, { data: "highshelf", label: "High shelf" },
-];
+  waiting: "Waiting for output", connecting: "Connecting", error: "Paused", unavailable: "Unavailable" };
+/** The same names in every preset list. */
+const presetOptions = (presets: Preset[]) => presets.map(p => ({ data: p.id, label: p.name }));
+/** The backend's refusals that a different name fixes (deckyeq/model.py name(), Service._do_rename). */
+const nameError = (error: string) => /\bnames?\b/i.test(error);
 
 // Steam's default ButtonItem uses an inline, fixed-width field layout.
 // Standalone QAM actions must occupy the available row instead.
@@ -36,7 +38,14 @@ const styles = `
 .deq .deq-note { margin:0 16px 12px; padding:10px 12px; border-radius:8px; background:#26382f; font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
 .deq .deq-error { background:#472f2e; color:#ffd2cc; }
 .deq .deq-value { color:var(--deq-accent); font-variant-numeric:tabular-nums; }
-.deq .deq-chart { display:block; width:100%; height:auto; margin-top:12px; }
+`;
+// Steam's dialog at full size, as Companion's fan curve editor sizes it.
+const fullStyles = `
+.deq-full { width:min(1120px,94vw)!important; max-width:94vw!important; height:100%!important; max-height:900px!important; min-height:0!important;
+  display:flex!important; flex-direction:column!important; flex:1 1 auto!important; overflow:hidden!important; box-sizing:border-box!important; padding:20px!important; }
+.deq-full-layer { padding:16px!important; overflow:hidden!important; align-items:center!important; justify-content:center!important; }
+.deq-full button { min-height:40px; }
+.deq-full * { box-sizing:border-box; }
 `;
 
 export function EqualizerIcon() {
@@ -48,31 +57,11 @@ export function EqualizerIcon() {
   </svg>;
 }
 
-function BandLevels({ eq }: { eq: EQ }) {
-  const slot = 270 / eq.bands.length;  // Bars share the chart width, whatever the band count.
-  return <svg className="deq-chart" viewBox="0 0 270 98" role="img" aria-label={`${eq.bands.length} equalizer band gain levels`}>
-    <line x1="2" x2="268" y1="40" y2="40" stroke="#ffffff20" />
-    <line x1="2" x2="268" y1="10" y2="10" stroke="#ffffff08" />
-    <line x1="2" x2="268" y1="70" y2="70" stroke="#ffffff08" />
-    {eq.bands.map((band, i) => {
-      const y = 40 - band.gain * 2.5;
-      return <g key={i}>
-        <rect x={i * slot + slot * 0.18} y={Math.min(y, 40)} width={slot * 0.64} height={Math.max(2, Math.abs(y - 40))}
-          rx="2" fill={band.gain >= 0 ? "#73e3c0" : "#af9aeb"} />
-        <text x={i * slot + slot / 2} y="93" textAnchor="middle" fill="#91a1b2" fontSize="10">
-          {band.frequency >= 1000 ? `${Number((band.frequency / 1000).toFixed(1))}k` : Number(band.frequency.toFixed(1))}
-        </text>
-      </g>;
-    })}
-  </svg>;
-}
-
-type Section = "bands" | "band" | "presets" | "output" | "about";
-const titles: Record<Section, string> = { bands: "Equalizer bands", band: "Edit one band", presets: "Presets",
-  output: "Output and level", about: "About" };
+type Section = "bands" | "presets" | "output" | "about";
+const titles: Record<Section, string> = { bands: "Equalizer", presets: "Presets", output: "Output", about: "About" };
 
 // Field supplies Steam's label, spacing, focus highlight and activation; the icons inherit its color.
-const iconPaths: Record<Exclude<Section, "band">, ReactNode> = {
+const iconPaths: Record<Section, ReactNode> = {
   bands: <path d="M4 21v-7m0-4V3m8 18v-9m0-4V3m8 18v-5m0-4V3M1 14h6m2-6h6m2 8h6" />,
   presets: <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />,
   output: <><path d="M11 5 6 9H2v6h4l5 4V5z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></>,
@@ -130,18 +119,35 @@ function NameModal({ title, initial, ok, error, onSubmit, closeModal }:
   </ConfirmModal>;
 }
 
-/** Runs a backend action; a failure is also toasted, as the panel's message may be out of view. */
-type Run = (action: string, payload?: Record<string, unknown>) => void;
+/** Runs a backend action; a failure is also toasted, as the panel's message may be out of view.
+ *  `toggle` names the control to redraw when it is refused (or redraws it). */
+type Run = (action: string, payload?: Record<string, unknown>, toggle?: Redraw) => void;
+/** Steam's toggles and dropdowns keep showing what was picked until they are redrawn from the state. */
+type Toggle = "enable" | "own" | "speakers" | "preset" | "output";
+type Redraw = Toggle | (() => void);
 
 /** What every page needs from the panel: the confirmed state and how to change it. */
 interface Page {
-  controller: Controller; snapshot: Snapshot; locked: boolean; run: Run;
+  controller: Controller; snapshot: Snapshot; preset: Preset; locked: boolean; run: Run;
   /** Shows a failure where the user can see it while a dialog hides the QAM. */
   notify(text: string): void;
   change(patch: Partial<EQ>): void;
   bandChange(index: number, patch: Partial<Band>): void;
-  confirm(heading: string, description: string, action: () => void, ok?: string, destructive?: boolean): void;
-  select(id: string): void;
+  confirm(heading: string, description: string, action: () => void, ok?: string, destructive?: boolean, toggle?: Redraw): void;
+  /** Switches preset; `redraw` puts a dropdown other than the panel's back when the switch is cancelled or refused. */
+  select(id: string, redraw?: () => void): void;
+  /** Asks for a preset name in a dialog, then saves as new or renames. */
+  named(title: string, ok: string, action: "save_as" | "rename", initial?: string): void;
+  /** Keeps the unsaved changes: in this preset, or for a built-in one as a new preset. */
+  save(): void;
+  discard(): void;
+  /** Per control, changes when its change was cancelled or refused: Steam's control redraws from the state. */
+  resets: Record<Toggle, number>;
+  /** Five sliders instead of ten (this device's preference). */
+  five: boolean;
+  /** The main screen's curve, editable. */
+  graph: ReactNode;
+  openFull(): void;
 }
 
 function GainSlider({ label, value, onChange, disabled, range = limits.band_gain as [number, number] }:
@@ -152,30 +158,37 @@ function GainSlider({ label, value, onChange, disabled, range = limits.band_gain
 
 /** What Volume boost does now; it is global, so it says so before it is moved. */
 const boostNote = ({ boost, enabled, speakers_only }: Snapshot["state"]) =>
-  !enabled ? "For every preset; takes effect when EQ is on."
-    : boost === 0 ? "Louder than SteamOS allows, for every preset. The limiter keeps it from clipping."
-    : `For every preset; the limiter keeps it from clipping.${speakers_only ? "" : " Mind your hearing on headphones."}`;
+  !enabled ? "For every preset and game, once EQ is on."
+    : `For every preset and game.${boost > 0 && !speakers_only ? " Mind your hearing on headphones." : ""}`;
 
-const typeSuffix = (band: Band) => band.type === "peaking" ? "" : band.type === "lowshelf" ? " · Low shelf" : " · High shelf";
-const bandLabel = (band: Band) => `${formatHz(band.frequency)}${typeSuffix(band)}`;
 
-function MainPage({ page, open, focus, preset }: { page: Page; open(section: Section): void; focus: Section | null; preset: string }) {
-  const { snapshot: { state, audio, presets, dirty, version }, locked, change, select, controller } = page;
+function MainPage({ page, open, focus }: { page: Page; open(section: Section): void; focus: Section | null }) {
+  const { snapshot: { state, audio, presets, dirty, version, game }, locked, change, select, controller, confirm } = page;
+  const own = !!game && state.scope === game.appid;
+  const saved = !!game && game.appid in state.games;
   const eq = state.working;
-  const adjusted = eq.bands.filter(band => band.gain !== 0).length;
+  const adjusted = eq.bands.filter((_, i) => shown(eq, i).gain !== 0).length;
   const output = audio.outputs.find(o => o.name === state.target)?.description || (state.target ? "Disconnected output" : "No output chosen");
-  const level = Math.abs(audio.effective_preamp) > 0.05 ? `level ${db(audio.effective_preamp)}` : "full level";
+  const level = state.enabled && Math.abs(audio.effective_preamp) > 0.05 ? ` · level ${db(audio.effective_preamp)}` : "";
+  const games = Object.keys(state.games).length;
   return <>
     <PanelSection>
-      <PanelSectionRow><ToggleField label="Enable EQ" checked={state.enabled}
-        disabled={locked || (!audio.supported && !state.enabled)} onChange={enabled => page.run("enable", { enabled })} /></PanelSectionRow>
-      <PanelSectionRow><DropdownItem label="Preset" layout="below" childrenContainerWidth="max"
-        rgOptions={presets.map(p => ({ data: p.id, label: p.name }))}
-        selectedOption={state.selected} disabled={locked} onChange={option => select(option.data)} /></PanelSectionRow>
+      <PanelSectionRow><ToggleField key={page.resets.enable} label="Enable EQ" checked={state.enabled}
+        disabled={locked || (!audio.supported && !state.enabled)} onChange={enabled => page.run("enable", { enabled }, "enable")} /></PanelSectionRow>
       <PanelSectionRow><SliderField label="Volume boost" value={state.boost} min={limits.boost[0]} max={limits.boost[1]}
         step={0.5} resetValue={0} showValue valueSuffix=" dB" disabled={locked}
         description={boostNote(state)}
         onChange={boost => controller.edit(cloneEQ(eq), boost)} /></PanelSectionRow>
+      {game && <PanelSectionRow><ToggleField key={page.resets.own} label={`Own sound for ${game.name}`} checked={own} disabled={locked}
+        description={own ? "Sound changes apply to this game only. The preset library is shared."
+          : saved ? "Its saved sound could not be applied. Turn on to try again." : "This game uses your everyday sound."}
+        onChange={enabled => enabled ? page.run("own_sound", { enabled, appid: game.appid }, "own")
+          : confirm(`Forget the sound for ${game.name}?`, "The game will use your everyday sound.",
+            () => page.run("own_sound", { enabled, appid: game.appid }, "own"), "Forget", true, "own")} /></PanelSectionRow>}
+      <PanelSectionRow><DropdownItem key={page.resets.preset} label="Preset" layout="below" childrenContainerWidth="max"
+        rgOptions={presetOptions(presets)}
+        selectedOption={state.selected} disabled={locked} onChange={option => select(option.data)} /></PanelSectionRow>
+      <PanelSectionRow>{page.graph}</PanelSectionRow>
     </PanelSection>
     <PanelSection title="Tone">
       <GainSlider label={`Bass · below ${formatHz(limits.bass_frequency)}`} value={eq.bass} disabled={locked}
@@ -184,158 +197,127 @@ function MainPage({ page, open, focus, preset }: { page: Page; open(section: Sec
         range={limits.tone_gain as [number, number]} onChange={treble => change({ treble })} />
       <PanelSectionRow><SliderField label="Stereo width" value={Math.round(eq.width * 100)}
         min={limits.width[0] * 100} max={limits.width[1] * 100} step={5} resetValue={100} showValue valueSuffix="%"
-        description={eq.width === 1 ? undefined : eq.width < 1 ? "Narrower; 0% is mono." : "Wider than the original mix."}
+        description={eq.width < 1 ? "0% is mono." : undefined}
         disabled={locked} onChange={percent => change({ width: percent / 100 })} /></PanelSectionRow>
     </PanelSection>
+    {/* Below the sliders that make the sound edited: appearing mid-drag must not move the slider being dragged. */}
+    {dirty && <PanelSection title="Unsaved changes">
+      <PanelSectionRow><ActionButton disabled={locked} onClick={page.save}>{page.preset.factory ? "Save as new…" : "Save"}</ActionButton></PanelSectionRow>
+      <PanelSectionRow><ActionButton disabled={locked} onClick={page.discard}>Discard</ActionButton></PanelSectionRow>
+    </PanelSection>}
     <PanelSection title="More">
       <SectionLink title={titles.bands} icon={iconPaths.bands} focus={focus === "bands"} onOpen={() => open("bands")}
-        description={`${eq.bands.length} bands · ${adjusted ? `${adjusted} adjusted` : "flat"}`} />
+        description={`${adjusted ? `${adjusted} ${adjusted === 1 ? "band" : "bands"} adjusted` : "No bands adjusted"}${level}`} />
       <SectionLink title={titles.presets} icon={iconPaths.presets} focus={focus === "presets"} onOpen={() => open("presets")}
-        description={dirty ? `${preset} · unsaved changes` : `${presets.length} presets`} />
+        description={`${presets.length} presets${games ? ` · ${games} game ${games === 1 ? "sound" : "sounds"}` : ""}`} />
       <SectionLink title={titles.output} icon={iconPaths.output} focus={focus === "output"} onOpen={() => open("output")}
-        description={`${output} · ${level}`} />
+        description={output} />
       <SectionLink title={titles.about} icon={iconPaths.about} focus={focus === "about"} onOpen={() => open("about")}
         description={`Version ${version} · updates`} />
     </PanelSection>
   </>;
 }
 
-function BandsPage({ page, openBand, focus }: { page: Page; openBand(): void; focus: boolean }) {
-  const { snapshot, locked, bandChange, confirm, run } = page;
-  const eq = snapshot.state.working;
+function EqualizerPage({ page }: { page: Page }) {
+  const { snapshot, locked, bandChange, confirm, run, controller, change, five } = page;
+  const eq = snapshot.state.working, compensation = snapshot.audio.compensation;
   return <>
-    <div className="deq-card"><BandLevels eq={eq} /></div>
     <PanelSection>
-      {eq.bands.map((band, i) => <GainSlider key={i} label={bandLabel(band)} value={band.gain} disabled={locked}
-        onChange={gain => bandChange(i, { gain })} />)}
+      <PanelSectionRow><ActionButton disabled={locked} onClick={page.openFull}>Edit full screen</ActionButton></PanelSectionRow>
     </PanelSection>
-    <PanelSection title="Fine tuning">
-      <SectionLink title="Edit one band" description="Filter type, frequency and width" focus={focus} onOpen={openBand} />
+    <PanelSection>
+      {/* Always ten bands (or five pairs): a placeholder that does nothing shows as a flat band at its usual frequency. */}
+      {five ? pairs(eq).map((pair, p) => <GainSlider key={`pair${p}`} label={pair.label}
+        value={pair.gain} disabled={locked} onChange={gain => controller.edit(withPairGain(eq, p, gain))} />)
+        : eq.bands.map((_, i) => <GainSlider key={i} label={formatHz(bandHz(eq, i))} value={shown(eq, i).gain} disabled={locked}
+          onChange={gain => bandChange(i, { gain })} />)}
+      <PanelSectionRow><SliderField label="Input level" value={eq.preamp} min={limits.preamp[0]} max={limits.preamp[1]}
+        step={0.5} resetValue={0} showValue valueSuffix=" dB" disabled={locked}
+        description={compensation < -0.05
+          ? `Lowered by ${db(-compensation).slice(1)} to make room for big EQ boosts.`
+          : undefined}
+        onChange={preamp => change({ preamp })} /></PanelSectionRow>
+      <PanelSectionRow><ToggleField label="Five sliders" checked={five} onChange={setFiveBands}
+        description="Each slider moves two bands." /></PanelSectionRow>
+    </PanelSection>
+    <PanelSection>
       <PanelSectionRow><ActionButton disabled={locked} onClick={() => confirm("Reset to flat?",
-        "Bands, bass, treble, stereo width and the level settings return to their defaults. Saved presets stay in your library.",
+        `Bands, bass, treble, stereo width and input level return to their defaults. Volume boost stays.${
+          snapshot.state.scope ? " Only this game's sound is reset." : ""}`,
         () => run("reset"), "Reset")}>Reset to flat</ActionButton></PanelSectionRow>
     </PanelSection>
   </>;
 }
 
-function BandPage({ page, index, setIndex }: { page: Page; index: number; setIndex(index: number): void }) {
-  const { snapshot, locked, bandChange } = page;
-  const eq = snapshot.state.working;
-  const band = eq.bands[index];
-  const [frequencyText, setFrequencyText] = useState(String(band.frequency));
-  useEffect(() => { setFrequencyText(String(band.frequency)); }, [band.frequency, index]);
-  const exactFrequency = Number(frequencyText.trim().replace(",", "."));
-  const validFrequency = frequencyText.trim() !== "" && Number.isFinite(exactFrequency) &&
-    exactFrequency >= freqMin && exactFrequency <= freqMax;
-  return <PanelSection>
-    <PanelSectionRow><DropdownItem label="Band" layout="below" childrenContainerWidth="max" selectedOption={index}
-      rgOptions={eq.bands.map((b, i) => ({ data: i, label: `${i + 1} · ${bandLabel(b)}` }))}
-      onChange={option => setIndex(option.data)} /></PanelSectionRow>
-    <GainSlider label="Gain" value={band.gain} disabled={locked} onChange={gain => bandChange(index, { gain })} />
-    <PanelSectionRow><DropdownItem label="Filter type" layout="below" childrenContainerWidth="max" selectedOption={band.type} disabled={locked}
-      rgOptions={filterTypes} onChange={option => bandChange(index, option.data === "peaking" ? { type: option.data }
-        : { type: option.data, q: Math.min(band.q, limits.shelf_q_max) })} /></PanelSectionRow>
-    <PanelSectionRow><SliderField label={`Frequency · ${formatHz(band.frequency)}`}
-      value={Math.log10(Math.min(stableMax, Math.max(stableMin, band.frequency)))}
-      min={Math.log10(stableMin)} max={Math.log10(stableMax)} step={Math.log10(2) / 12} disabled={locked}
-      onChange={value => bandChange(index, { frequency: Math.min(stableMax, Math.max(stableMin, Math.round(10 ** value * 100) / 100)) })} />
-    </PanelSectionRow>
-    <PanelSectionRow><SliderField label="Bandwidth (Q)"
-      description={band.type === "peaking" ? "Higher Q affects a narrower range." : "Higher Q adds a bump at the shelf's corner."}
-      value={band.q} min={limits.q[0]} max={band.type === "peaking" ? limits.q[1] : limits.shelf_q_max} step={0.1} showValue disabled={locked}
-      onChange={q => bandChange(index, { q })} /></PanelSectionRow>
-    <Details rows={[]} label="exact frequency">
-      <PanelSectionRow><TextField label="Exact frequency (Hz)" value={frequencyText} disabled={locked}
-        description={`${formatHz(stableMin)} – ${formatHz(stableMax)}. 0 Hz and ${formatHz(limits.passthrough_frequency)}–${formatHz(freqMax)} are also accepted for compatibility with the original Go S preset.`}
-        onChange={event => setFrequencyText(event.target.value.slice(0, 20))} /></PanelSectionRow>
-      <PanelSectionRow><ActionButton disabled={locked || !validFrequency || exactFrequency === band.frequency}
-        onClick={() => {
-          const frequency = safeFrequency(exactFrequency);
-          setFrequencyText(String(frequency));  // Show a snapped value even when the band already had it.
-          bandChange(index, { frequency });
-        }}>Apply exact frequency</ActionButton></PanelSectionRow>
-    </Details>
-  </PanelSection>;
-}
-
 function PresetsPage({ page, pick }: { page: Page; pick(kind: "import" | "export"): void }) {
-  const { controller, snapshot, locked, confirm, select, run, notify } = page;
-  const preset = snapshot.presets.find(p => p.id === snapshot.state.selected) ?? snapshot.presets[0];
-  // A dialog hides the QAM: a refused name reopens it with what was typed and the reason.
-  const named = (title: string, ok: string, action: "save_as" | "rename", initial = "", error?: string) => {
-    showModal(<NameModal title={title} ok={ok} initial={initial} error={error} onSubmit={async name => {
-      const result = await controller.action(action, action === "rename" ? { name, id: preset.id } : { name });
-      if (result.ok) return;
-      if (result.state) named(title, ok, action, name, result.error || "The operation failed.");
-      else notify(result.error || "The operation failed.");  // Busy or disconnected: nothing to fix in the dialog.
-    }} />);
-  };
+  const { snapshot, preset, locked, confirm, select, run, named } = page;
   return <>
     <PanelSection>
-      <PanelSectionRow><DropdownItem label="Preset" layout="below" childrenContainerWidth="max"
-        rgOptions={snapshot.presets.map(p => ({ data: p.id, label: `${p.name}${p.factory ? " · built-in" : ""}` }))}
+      <PanelSectionRow><DropdownItem key={page.resets.preset} label="Preset" layout="below" childrenContainerWidth="max"
+        rgOptions={presetOptions(snapshot.presets)}
         selectedOption={preset.id} disabled={locked} onChange={option => select(option.data)} /></PanelSectionRow>
     </PanelSection>
-    <PanelSection title={`${preset.name}${snapshot.dirty ? " · unsaved changes" : ""}`}>
+    <PanelSection title={`${preset.name}${snapshot.dirty ? " · edited" : ""}`}>
       {preset.description && infoRow("About this preset", preset.description)}
       {snapshot.dirty && !preset.factory && <PanelSectionRow><ActionButton disabled={locked}
-        onClick={() => run("save")}>Save changes</ActionButton></PanelSectionRow>}
+        onClick={() => run("save")}>Save</ActionButton></PanelSectionRow>}
       {snapshot.dirty && <PanelSectionRow><ActionButton disabled={locked}
-        onClick={() => confirm("Discard changes?", `Restore the saved version of “${preset.name}”.`,
-          () => run("revert", { id: preset.id }), "Discard")}>Discard changes</ActionButton></PanelSectionRow>}
+        onClick={page.discard}>Discard</ActionButton></PanelSectionRow>}
       <PanelSectionRow><ActionButton disabled={locked}
-        onClick={() => named("Save as new preset", "Save", "save_as")}>Save as new…</ActionButton></PanelSectionRow>
+        onClick={() => named("Save as new preset", "Save", "save_as", preset.name)}>Save as new…</ActionButton></PanelSectionRow>
       {!preset.factory && <>
         <PanelSectionRow><ActionButton disabled={locked}
           onClick={() => named("Rename preset", "Rename", "rename", preset.name)}>Rename…</ActionButton></PanelSectionRow>
         <PanelSectionRow><ActionButton disabled={locked}
           onClick={() => confirm("Delete preset?", `Delete “${preset.name}” and switch to Flat?`,
-            () => run("delete", { id: preset.id }), "Delete", true)}>Delete…</ActionButton></PanelSectionRow>
+            () => run("delete", { id: preset.id }), "Delete", true)}>Delete</ActionButton></PanelSectionRow>
       </>}
-      {preset.factory && snapshot.dirty && infoRow("Built-in preset", "Built-in presets stay as they are. Use Save as new to keep your changes.")}
+      {preset.factory && snapshot.dirty && infoRow("Built-in preset", "Save as new to keep your changes.")}
     </PanelSection>
     <PanelSection title="Files">
-      <PanelSectionRow><ActionButton disabled={locked} onClick={() => pick("import")}>Import preset…</ActionButton></PanelSectionRow>
-      <PanelSectionRow><ActionButton disabled={locked}
-        onClick={() => run("export", { all: false })}>Export this sound</ActionButton></PanelSectionRow>
-      <PanelSectionRow><ActionButton disabled={locked}
-        onClick={() => run("export", { all: true })}>Export all presets</ActionButton></PanelSectionRow>
-      <Details rows={[["Export folder", snapshot.export_directory],
-        ["What is exported", "This sound includes your latest edits. All presets is your saved library."]]}>
-        <PanelSectionRow><ActionButton disabled={locked} onClick={() => pick("export")}>Export this sound to another folder…</ActionButton></PanelSectionRow>
+      <Details label="import or export" rows={[["Export folder", snapshot.export_directory]]}>
+        <PanelSectionRow><ActionButton disabled={locked} onClick={() => pick("import")}>Import presets…</ActionButton></PanelSectionRow>
+        <PanelSectionRow><ActionButton disabled={locked}
+          onClick={() => run("export", { all: false })}>Export this sound</ActionButton></PanelSectionRow>
+        <PanelSectionRow><ActionButton disabled={locked}
+          onClick={() => run("export", { all: true })}>Export your presets</ActionButton></PanelSectionRow>
+        <PanelSectionRow><ActionButton disabled={locked} onClick={() => pick("export")}>Export this sound to…</ActionButton></PanelSectionRow>
       </Details>
     </PanelSection>
+    {Object.keys(snapshot.state.games).length > 0 && <PanelSection title="Games with their own sound">
+      {Object.entries(snapshot.state.games).map(([appid, game]) => <PanelSectionRow key={appid}><ActionButton disabled={locked}
+        onClick={() => confirm(`Forget the sound for ${game.name}?`, "The game will use your everyday sound.",
+          () => run("forget_game", { appid }), "Forget", true)}>Forget {game.name}</ActionButton></PanelSectionRow>)}
+    </PanelSection>}
   </>;
 }
 
+/** The description, plus what tells it apart (the active port, else the unique name) when two outputs share it. */
+const outputLabel = (output: Output, all: Output[]) => {
+  const twins = all.filter(o => o.description === output.description);
+  if (twins.length < 2) return output.description;
+  const portTells = !!output.port && new Set(twins.map(o => o.port)).size === twins.length;
+  return `${output.description} (${portTells ? output.port : output.name})`;
+};
+
 function OutputPage({ page }: { page: Page }) {
-  const { run, snapshot: { state, audio }, locked, change } = page;
-  const eq = state.working;
+  const { run, snapshot: { state, audio }, locked } = page;
   const disconnected = state.target && !audio.outputs.some(o => o.name === state.target)
     ? [{ data: state.target, label: "Selected output · disconnected" }] : [];
   const steam = audio.outputs.find(o => o.name === audio.default)?.description || audio.default || "Unknown";
   return <>
-    <PanelSection title="Output">
-      <PanelSectionRow><DropdownItem label="Apply EQ to" layout="below" childrenContainerWidth="max" selectedOption={state.target} disabled={locked}
+    <PanelSection>
+      <PanelSectionRow><DropdownItem key={page.resets.output} label="Apply EQ to" layout="below" childrenContainerWidth="max" selectedOption={state.target} disabled={locked}
         strDefaultLabel="Choose an output"
-        rgOptions={[...audio.outputs.map(output => ({ data: output.name, label: output.description })), ...disconnected]}
-        onChange={option => run("output", { target: option.data, speakers_only: state.speakers_only })} /></PanelSectionRow>
-      <PanelSectionRow><ToggleField label="Speakers only" checked={state.speakers_only} disabled={locked}
-        description="Pause EQ while this device plays to headphones. Turn off to EQ a headset or HDMI output."
-        onChange={speakers_only => run("output", { target: state.target, speakers_only })} /></PanelSectionRow>
-    </PanelSection>
-    <PanelSection title="Level">
-      <PanelSectionRow><SliderField label="Input level" value={eq.preamp} min={limits.preamp[0]} max={limits.preamp[1]}
-        step={0.5} resetValue={0} showValue valueSuffix=" dB" disabled={locked}
-        description={audio.compensation < -0.05
-          ? `EQ boosts above +${limits.limiter_allowance} dB lower it by ${db(-audio.compensation).slice(1)} so the limiter does not squash them.`
-          : undefined}
-        onChange={preamp => change({ preamp })} /></PanelSectionRow>
+        rgOptions={[...audio.outputs.map(output => ({ data: output.name, label: outputLabel(output, audio.outputs) })), ...disconnected]}
+        onChange={option => run("output", { target: option.data, speakers_only: state.speakers_only }, "output")} /></PanelSectionRow>
+      <PanelSectionRow><ToggleField key={page.resets.speakers} label="Speakers only" checked={state.speakers_only} disabled={locked}
+        description="No EQ on headphones, HDMI or Bluetooth."
+        onChange={speakers_only => run("output", { target: state.target, speakers_only }, "speakers")} /></PanelSectionRow>
       <Details rows={[
-        ["Status", audio.message],
-        ["Effective input level", `${db(audio.effective_preamp)}, including automatic headroom`],
         ["Steam output", steam],
-        ["Your volume stays yours", "EQ sits in front of the chosen output. Steam's volume, volume buttons and output choice work as usual; when Steam plays to another output, EQ waits."],
+        ...(audio.game_error ? [["Game sound", audio.game_error] as [string, string]] : []),
+        ["Volume", "Steam's volume, volume buttons and output choice work as usual."],
       ]}>
         <PanelSectionRow><ActionButton disabled={locked || !audio.supported}
           onClick={() => run("refresh")}>Reconnect EQ</ActionButton></PanelSectionRow>
@@ -344,15 +326,56 @@ function OutputPage({ page }: { page: Page }) {
   </>;
 }
 
-function AboutPage({ version, updates }: { version: string; updates?: UpdateController }) {
+/** The curve at full size in a Steam dialog; `page` is the panel's latest, so its actions see the sound shown now. */
+function FullEditor({ controller, page, closeModal }: { controller: Controller; page(): Page; closeModal?(): void }) {
+  const view = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  const five = useFiveBands();
+  const [band, setBand] = useState(0);
+  const [redraw, setRedraw] = useState(0);  // Like the panel's resets: this dialog is not redrawn with the panel.
+  useEffect(() => {  // The QAM's polling pauses while it is hidden: the status line here stays current on its own.
+    void controller.refresh();
+    const timer = setInterval(() => void controller.refresh(), POLL_MS);
+    return () => clearInterval(timer);
+  }, []);
+  const snapshot = view.snapshot;
+  if (!snapshot) return null;
+  const { state, presets, dirty, audio } = snapshot;
+  const preset = presets.find(p => p.id === state.selected) ?? presets[0];
+  const locked = view.busy || !view.connected;
+  return <ModalRoot bAllowFullSize className="deq-full" modalClassName="deq-full-layer" onCancel={closeModal} closeModal={closeModal}>
+    <style>{fullStyles}</style>
+    <DialogHeader>Curve editor</DialogHeader>
+    <DialogBody style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, margin: 0, padding: 0 }}>
+      <Focusable flow-children="row" style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr)", gap: 16, alignItems: "end" }}>
+        <DropdownItem key={redraw} label="Preset" rgOptions={presetOptions(presets)} selectedOption={state.selected}
+          disabled={locked} onChange={option => page().select(option.data, () => setRedraw(n => n + 1))} />
+        <ToggleField label="Five sliders" checked={five} onChange={setFiveBands} />
+      </Focusable>
+      <div style={{ flex: "1 0 260px", minHeight: 260 }}>
+        <CurveGraph fullscreen eq={state.working} five={five} disabled={locked} selected={band} select={setBand} edit={controller.edit} />
+      </div>
+      <div role={view.error ? "alert" : "status"} style={{ fontSize: 14, color: view.error ? "#ffd2cc" : "#afb7c0" }}>
+        {dirty ? "Edited · " : ""}{view.error || (view.saving ? "Applying…" : audio.message)}</div>
+    </DialogBody>
+    <DialogFooter style={{ margin: 0, padding: 0, flexShrink: 0 }}>
+      <Focusable flow-children="row" style={{ display: "flex", gap: 12, width: "100%" }}>
+        <DialogButton style={{ flex: 1 }} disabled={locked || !dirty} onClick={() => page().save()}>{preset.factory ? "Save as new…" : "Save"}</DialogButton>
+        <DialogButton style={{ flex: 1 }} disabled={locked || !dirty} onClick={() => page().discard()}>Discard</DialogButton>
+        <DialogButton style={{ flex: 1 }} onClick={closeModal}>Done</DialogButton>
+      </Focusable>
+    </DialogFooter>
+  </ModalRoot>;
+}
+
+function AboutPage({ version, updates, home }: { version: string; updates?: UpdateController; home: string }) {
   return <>
+    {updates && <UpdateSection controller={updates} home={home} />}
     <PanelSection title="DeckyEQ">
-      {infoRow(`Version ${version}`, "A live equalizer with bass, treble, stereo width, volume boost, a limiter and your own presets, inside Gaming Mode.")}
+      {infoRow(`Version ${version}`)}
       {infoRow("Author", "Rayek · github.com/Rayekkk/DeckyEQ")}
       {infoRow("License", "BSD 3-Clause · Copyright (c) 2026 Rayekkk. Dependency notices are included in the plugin package.")}
-      {infoRow("Powered by PipeWire", "Built-in stereo filters · no additional audio effects packages. Turning EQ off restores normal routing and keeps your library.")}
+      {infoRow("Powered by PipeWire", "PipeWire filters and DeckyEQ's own limiter · no extra audio packages.")}
     </PanelSection>
-    {updates && <UpdateSection controller={updates} />}
   </>;
 }
 
@@ -362,10 +385,23 @@ export function App({ controller, files, updates, visible = true, toast }: {
   toast?(body: string): void;
 }) {
   const view = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  const five = useFiveBands();
   const [section, setSection] = useState<Section | null>(null);
   const [left, setLeft] = useState<Section | null>(null);  // The page just closed, whose row takes focus again.
-  const [bandIndex, setBandIndex] = useState(0);
+  const [graphBand, setGraphBand] = useState(0);
+  const latest = useRef<Page | null>(null);
+  const modals = useRef(new Set<{ Close(): void }>());
+  useEffect(() => () => modals.current.forEach(modal => modal.Close()), []);  // An unloaded plugin leaves no dialog open.
+  const show = (element: ReactElement, props: ShowModalProps = {}) => {
+    const modal = showModal(element, undefined, { ...props, fnOnClose: () => { modals.current.delete(modal); } });
+    modals.current.add(modal);
+  };
   const [picking, setPicking] = useState(false);
+  const [resets, setResets] = useState<Record<Toggle, number>>({ enable: 0, own: 0, speakers: 0, preset: 0, output: 0 });
+  const reset = (toggle?: Redraw) => {
+    if (typeof toggle === "function") toggle();
+    else if (toggle) setResets(counts => ({ ...counts, [toggle]: counts[toggle] + 1 }));
+  };
   const snapshot = view.snapshot;
   const locked = view.busy || !view.connected || picking;
   useEffect(() => {
@@ -376,6 +412,10 @@ export function App({ controller, files, updates, visible = true, toast }: {
     return () => clearInterval(timer);
   }, [controller, visible]);
   useEffect(() => {
+    controller.onEditRejected = toast;
+    return () => { controller.onEditRejected = undefined; };
+  }, [controller, toast]);
+  useEffect(() => {
     if (!toast || !view.note) return;
     toast(view.note);
     controller.clearMessage();  // The note lives in the controller; a remount must not toast it again.
@@ -383,7 +423,7 @@ export function App({ controller, files, updates, visible = true, toast }: {
 
   if (!snapshot) return <div className="deq"><style>{styles}</style>
     <PanelSection title="DeckyEQ"><PanelSectionRow>
-      <Field focusable label={view.error ? "Could not load DeckyEQ" : "Loading equalizer…"} description={view.error || "Connecting to the plugin backend."} />
+      <Field focusable label={view.error ? "Could not load DeckyEQ" : "Loading DeckyEQ…"} description={view.error || undefined} />
       {view.error && <ActionButton onClick={() => void controller.refresh()}>Reconnect</ActionButton>}
     </PanelSectionRow></PanelSection>
     {view.error && updates && <UpdateSection controller={updates} />}
@@ -396,29 +436,44 @@ export function App({ controller, files, updates, visible = true, toast }: {
     setLeft(section);
     setSection(next);
   };
-  const confirm = (heading: string, description: string, action: () => void, ok = "Continue", destructive = false) => {
-    showModal(<ConfirmModal strTitle={heading} strDescription={description} bDestructiveWarning={destructive}
-      strOKButtonText={ok} strCancelButtonText="Cancel" onOK={action} />);
+  const confirm = (heading: string, description: string, action: () => void, ok = "Continue", destructive = false, toggle?: Redraw) => {
+    show(<ConfirmModal strTitle={heading} strDescription={description} bDestructiveWarning={destructive}
+      strOKButtonText={ok} strCancelButtonText="Cancel" onOK={action} onCancel={() => reset(toggle)} />);
   };
   const notify = (text: string) => toast?.(text);
-  const run: Run = (action, payload) => void controller.action(action, payload).then(result => {
-    if (!result.ok) notify(result.error || "The operation failed.");
+  // Carries the sound this render showed: a dialog confirmed after a game switched it is refused.
+  const runIn = (scope: string): Run => (action, payload, toggle) => void controller.action(action, { ...payload, scope }).then(result => {
+    if (!result.ok) { notify(result.error || "The operation failed."); reset(toggle); }
   });
+  const run = runIn(state.scope);
+  // A dialog hides the QAM: a refused name reopens it with what was typed and the reason.
+  const named = (title: string, ok: string, action: "save_as" | "rename", initial = "", error?: string) => {
+    show(<NameModal title={title} ok={ok} initial={initial} error={error} onSubmit={async name => {
+      // Like run: the sound this render showed; a game that switched it meanwhile gets the save refused.
+      const result = await controller.action(action, action === "rename" ? { name, id: preset.id } : { name, scope: state.scope });
+      if (result.ok) return;
+      const reason = result.error || "The operation failed.";
+      if (nameError(reason)) named(title, ok, action, name, reason);
+      else notify(reason);  // e.g. a full library or a switched sound: another name would not fix it.
+    }} />);
+  };
   const page: Page = {
-    controller, snapshot, locked, confirm, run, notify,
+    controller, snapshot, preset, locked, confirm, run, notify, resets, five, named,
     change: patch => controller.edit({ ...cloneEQ(state.working), ...patch }),
-    bandChange: (index, patch) => {
-      const next = cloneEQ(state.working);
-      next.bands[index] = { ...next.bands[index], ...patch };
-      controller.edit(next);
-    },
-    select: id => {
+    bandChange: (index, patch) => controller.edit(withBand(state.working, index, patch)),
+    select: (id, redraw = () => reset("preset")) => {
       if (id === state.selected) return;
-      const apply = () => run("select", { id });
-      if (snapshot.dirty) confirm("Switch preset?", "Your unsaved changes will be replaced. Save them first if you want to keep them.", apply, "Switch");
+      const apply = () => run("select", { id }, redraw);
+      if (snapshot.dirty) confirm("Switch preset?", `Unsaved changes to “${preset.name}” will be lost.`, apply, "Switch", false, redraw);
       else apply();
     },
+    save: () => preset.factory ? named("Save as new preset", "Save", "save_as", preset.name) : run("save"),
+    discard: () => confirm("Discard changes?", `Restore the saved version of “${preset.name}”.`, () => run("revert", { id: preset.id }), "Discard"),
+    graph: <CurveGraph eq={state.working} five={five} disabled={locked} selected={graphBand} select={setGraphBand} edit={controller.edit} />,
+    openFull: () => show(<FullEditor controller={controller} page={() => latest.current!} />,
+      { strTitle: "Curve editor", bNeverPopOut: true }),
   };
+  latest.current = page;
   const pick = async (kind: "import" | "export") => {
     if (locked) return;
     setPicking(true);
@@ -426,12 +481,14 @@ export function App({ controller, files, updates, visible = true, toast }: {
       controller.clearMessage();
       await controller.flush();
       if (controller.getSnapshot().error) return;  // Keep a failed edit visible instead of exporting around it.
+      // The picker can stay open while a game switches the sound: send the scope of the moment it closes.
+      const sendNow = () => runIn(controller.getSnapshot().snapshot?.state.scope ?? state.scope);
       if (kind === "import") {
         const path = await files.importFile(snapshot.home);
-        if (path) run("import", { path });
+        if (path) sendNow()("import", { path });
       } else {
         const directory = await files.exportFolder(snapshot.home);
-        if (directory) run("export", { directory, all: false });
+        if (directory) sendNow()("export", { directory, all: false });
       }
     } catch (error) { controller.reportError(error); }
     finally { setPicking(false); }
@@ -456,23 +513,20 @@ export function App({ controller, files, updates, visible = true, toast }: {
     {(!view.connected || audio.error) && <PanelSection><PanelSectionRow>
       <ActionButton disabled={view.busy} onClick={() => view.connected ? run("refresh") : void controller.refresh()}>
         {view.connected ? "Reconnect EQ" : "Reconnect"}</ActionButton></PanelSectionRow></PanelSection>}
-    <MainPage page={page} open={navigate} focus={visible ? left : null} preset={preset.name} />
+    <MainPage page={page} open={navigate} focus={visible ? left : null} />
   </div>;
 
-  const parent = section === "band" ? "bands" : null;
-  const returning = section === "bands" && left === "band";
   return <Focusable className="deq" onCancelActionDescription="Back" onCancelButton={event => {
     event.preventDefault();
     event.stopPropagation();  // B goes back one page instead of leaving the plugin.
-    navigate(parent);
+    navigate(null);
   }}><style>{styles}</style>
-    <SectionHeader key={section} title={titles[section]} back={parent ? titles[parent] : "DeckyEQ"}
-      onBack={() => navigate(parent)} focus={visible && !returning} />
+    <SectionHeader key={section} title={titles[section]} back="DeckyEQ" onBack={() => navigate(null)} focus={visible} />
     {messages}
-    {section === "bands" && <BandsPage page={page} openBand={() => navigate("band")} focus={visible && returning} />}
-    {section === "band" && <BandPage page={page} index={Math.min(bandIndex, state.working.bands.length - 1)} setIndex={setBandIndex} />}
+    {section !== "about" && audio.phase !== "active" && <div className="deq-note" role="status">{audio.message}</div>}
+    {section === "bands" && <EqualizerPage page={page} />}
     {section === "presets" && <PresetsPage page={page} pick={kind => void pick(kind)} />}
     {section === "output" && <OutputPage page={page} />}
-    {section === "about" && <AboutPage version={snapshot.version} updates={updates} />}
+    {section === "about" && <AboutPage version={snapshot.version} updates={updates} home={snapshot.home} />}
   </Focusable>;
 }

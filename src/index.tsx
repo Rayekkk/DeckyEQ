@@ -1,5 +1,5 @@
 import { callable, definePlugin, FileSelectionType, openFilePicker, toaster, useQuickAccessVisible } from "@decky/api";
-import { staticClasses } from "@decky/ui";
+import { Router, staticClasses } from "@decky/ui";
 import { App, EqualizerIcon, FileUI } from "./App";
 import { Controller } from "./controller";
 import { Result, Snapshot } from "./types";
@@ -13,9 +13,11 @@ const within = <T,>(seconds: number, request: Promise<T>) => new Promise<T>((res
 });
 const getStatus = callable<[], Snapshot>("get_status");
 const performAction = callable<[string, Record<string, unknown>, number], Result>("perform");
-const status = () => within(10, getStatus());
+const status = () => within(35, getStatus());  // The backend itself waits up to 30 s for its start.
 const perform = (action: string, payload: Record<string, unknown>, revision: number) =>
   within(45, performAction(action, payload, revision));  // Long enough for a filter rebuild.
+const setGame = callable<[string, string], Result>("set_game");
+const GAME_POLL_MS = 2000, GAME_RETRY_MS = 30_000;
 const checkUpdates = callable<[], UpdateCheck>("updates_check");
 const downloadUpdate = callable<[string], UpdateDownload>("updates_download");
 // Decky rejects the picker promise when the user closes it; that is not an error.
@@ -31,10 +33,52 @@ const toast = (body: string) => toaster.toast({ title: "DeckyEQ", body });
 export default definePlugin(() => {
   const controller = new Controller({ status, perform });
   const updates = new UpdateController({ check: checkUpdates, download: downloadUpdate });
+  // Runs while the QAM is closed too: a game with its own sound gets it within two seconds of starting.
+  // null: not reported yet, so the first tick also reports "no game" (a reboot may have left one active).
+  // A change of game (or none) counts only once two reads in a row agree: launchers and restarts blip.
+  let reported: string | null = null, refused: string | null = null, retryAt = 0, recheckAt = 0, closed = false, sending = false, request = 0;
+  let seen: string | null = null, pending: string | null = null;
+  const check = () => {
+    let app: typeof Router.MainRunningApp;
+    try { app = Router.MainRunningApp; } catch { return; }  // A Steam update may move the router.
+    const appid = app ? String(app.appid) : "";
+    if (appid === seen) pending = null;
+    else if (seen !== null && pending !== appid) { pending = appid; return; }
+    if (appid === reported) {  // A backend that restarted alone forgot the game: report it again.
+      if (!appid || sending || Date.now() < recheckAt) return;  // Rare: no status call every tick during play.
+      recheckAt = Date.now() + GAME_RETRY_MS;
+      void controller.refresh().then(() => {
+        if (!closed && !sending && reported === appid && (controller.getSnapshot().snapshot?.game?.appid ?? "") !== appid) reported = null;
+      });
+      return;
+    }
+    if (appid === refused && Date.now() < retryAt) return;
+    reported = seen = appid;
+    pending = null;
+    recheckAt = Date.now() + GAME_RETRY_MS;
+    sending = true;
+    const sent = ++request;  // A late answer for a game already left must not touch the current one's state.
+    void within(45, setGame(appid, app?.display_name ?? "")).then(async result => {
+      if (sent !== request) return;
+      sending = false;
+      if (closed) return;
+      const first = refused !== appid;
+      if (!result.ok) { reported = null; refused = appid; retryAt = Date.now() + GAME_RETRY_MS; }  // Retry every 30 s, not every tick.
+      else refused = null;
+      await controller.refresh();
+      // e.g. the filter could not switch: say so once. A backend that failed to start refuses every game and its
+      // status too; the panel says why, so the retries stay quiet.
+      if (!result.ok && first && !closed && controller.getSnapshot().connected) toast("The game's sound could not be applied.");
+    }, () => { if (sent === request) { sending = false; reported = null; } });  // The backend is not answering yet: try again next tick.
+  };
+  check();
+  const watch = setInterval(check, GAME_POLL_MS);
   const Content = () => <App controller={controller} files={files} updates={updates} toast={toast} visible={useQuickAccessVisible()} />;
   return { name: "DeckyEQ", titleView: <div className={staticClasses.Title}>DeckyEQ</div>,
     // Steam's native dropdown menu temporarily hides QAM. Preserve the mounted
     // view and its selection callbacks; App gates only polling on visibility.
     alwaysRender: true,
-    content: <Content />, icon: <EqualizerIcon />, onDismount: () => { updates.dispose(); controller.dispose(); } };
+    content: <Content />, icon: <EqualizerIcon />, onDismount: () => {
+      closed = true; clearInterval(watch); updates.dispose(); controller.dispose();
+    } };
 });

@@ -3,6 +3,11 @@ import { headroom } from "./headroom";
 
 const EDIT_DEBOUNCE_MS = 80;  // Coalesce slider drags into one backend write.
 const text = (error: unknown) => error instanceof Error ? error.message : String(error);
+/** A path relative to the home folder when it is inside it (the toast has little room); otherwise as it is. */
+export const fromHome = (path: string, home: string) => {
+  const base = home.replace(/\/+$/, "");
+  return base && path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
+};
 const UNCONFIRMED = "Your last change was not confirmed. The controls now show the sound DeckyEQ is using.";
 
 /** One queue survives QAM remounts. Slider writes are coalesced, never concurrent. */
@@ -17,6 +22,8 @@ export class Controller {
   private epoch = 0;
   private disposed = false;
   private unconfirmed = false;  // A write failed in transit; say so once the backend is back.
+  /** Told once per slider write the backend refused: the panel's note may be scrolled out of view. */
+  onEditRejected?: (error: string) => void;
   constructor(private transport: Transport) {}
 
   getSnapshot = (): View => this.view;
@@ -66,7 +73,7 @@ export class Controller {
     const preset = snapshot.presets.find(p => p.id === snapshot.state.selected);
     return { ...snapshot, state: { ...snapshot.state, working: cloneEQ(eq), ...(boost === null ? {} : { boost }) },
       dirty: !sameEQ(eq, preset?.eq),
-      audio: { ...snapshot.audio, ...headroom(eq, boost ?? snapshot.state.boost) } };
+      audio: { ...snapshot.audio, ...headroom(eq) } };
   }
 
   flush = async (): Promise<void> => {
@@ -87,7 +94,9 @@ export class Controller {
           this.view.snapshot.revision);
         if (!result.ok || !result.state) {
           this.desired = this.desiredBoost = null;
-          this.publish({ snapshot: result.state || this.view.snapshot, error: result.error || "EQ was not applied.", saving: false });
+          const error = result.error || "EQ was not applied.";
+          this.publish({ snapshot: result.state || this.view.snapshot, error, saving: false });
+          if (!this.disposed && !this.view.busy) this.onEditRejected?.(error);  // An action reports it with its own result.
           return;
         }
         this.publish({ snapshot: this.desired ? this.optimistic(result.state, this.desired, this.desiredBoost) : result.state,
@@ -117,7 +126,7 @@ export class Controller {
       const result = await this.transport.perform(action, payload, this.view.snapshot!.revision);
       if (result.state) this.publish({ snapshot: result.state });
       if (!result.ok) this.publish({ error: result.error || "The operation failed." });
-      else this.publish({ note: result.path ? `Exported to ${result.path}` : result.message || null });
+      else this.publish({ note: result.path ? `Exported to ${fromHome(result.path, this.view.snapshot!.home)}` : result.message || null });
       return result;
     } catch (error) {
       this.unconfirmed = true;  // The next successful poll must still say the action was not confirmed.

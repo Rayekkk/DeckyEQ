@@ -9,23 +9,30 @@ export interface EQ {
   /** Kept for preset compatibility; no longer used (the limiter always runs, boosts stay loud). */
   limiter: boolean;
 }
-export interface Preset { id: string; name: string; eq: EQ; factory?: boolean; description?: string }
+/** `boost`: a built-in tuned with a Volume boost sets it when chosen. */
+export interface Preset { id: string; name: string; eq: EQ; factory?: boolean; description?: string; boost?: number }
 export interface Settings {
   version: number; enabled: boolean; target: string; speakers_only: boolean;
   /** Global volume boost in dB, before the limiter; not part of any preset. */
   boost: number;
   selected: string; working: EQ;
+  /** "" for the everyday sound, or the app id of the running game whose own sound is active. */
+  scope: string;
+  /** The games with their own sound; the backend keeps their sounds, the panel needs the names. */
+  games: Record<string, { name: string }>;
 }
 export interface Output { name: string; description: string; port: string; speaker: boolean }
 export interface Snapshot {
   version: string; revision: number; state: Settings; presets: Preset[]; dirty: boolean;
+  /** The running game, as the panel last reported it. */
+  game: { appid: string; name: string } | null;
   audio: {
-    supported: boolean; phase: string; message: string; error: string | null;
+    supported: boolean; phase: string; message: string; error: string | null; game_error: string | null;
     outputs: Output[]; default: string; compensation: number; effective_preamp: number;
   };
   warning: string | null; home: string; export_directory: string;
 }
-export interface Result { ok: boolean; state?: Snapshot; error?: string; message?: string; path?: string }
+export interface Result { ok: boolean; state?: Snapshot; error?: string; message?: string | null; path?: string }
 export interface Transport {
   status(): Promise<Snapshot>;
   perform(action: string, payload: Record<string, unknown>, revision: number): Promise<Result>;
@@ -43,10 +50,6 @@ export const flatEQ = (): EQ => ({
   bands: frequencies.map(frequency => ({ frequency, gain: 0, q: limits.flat_q, type: "peaking" })),
   bass: 0, treble: 0, preamp: 0, auto_headroom: true, width: 1, limiter: true,
 });
-/** Mirrors model.frequency(): unstable float32 biquad ranges snap to the audible band. */
-const [stableLow, stableHigh] = limits.stable_frequency;
-export const safeFrequency = (hz: number) =>
-  hz > 0 && hz < stableLow ? stableLow : hz > stableHigh && hz < limits.passthrough_frequency ? stableHigh : hz;
 /** Field-wise comparison, independent of key order (presets may come from other tools). */
 export const sameEQ = (a: EQ, b?: EQ) => !!b && a.bass === b.bass && a.treble === b.treble &&
   a.preamp === b.preamp && a.auto_headroom === b.auto_headroom && a.width === b.width && a.limiter === b.limiter &&

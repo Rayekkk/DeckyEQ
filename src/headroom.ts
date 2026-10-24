@@ -39,12 +39,21 @@ function gainDb(design: Design, hz: number): number {
   return 10 * Math.log10(power(design[0]) / power(design[1]));
 }
 
+/** The bands and the tone shelves that change anything. */
+const filtersOf = (eq: EQ) => [
+  ...eq.bands.map((b): Filter => [b.type, b.frequency, b.q, b.gain]),
+  ["lowshelf", limits.bass_frequency, SHELF_Q, eq.bass], ["highshelf", limits.treble_frequency, SHELF_Q, eq.treble],
+].filter(f => f[3] !== 0) as Filter[];
+
+/** Gain, in dB, of all filters together at each frequency (the curve the panel draws; without the preamp). */
+export function response(eq: EQ, hz: number[]): number[] {
+  const designs = filtersOf(eq).map(biquad);
+  return hz.map(f => designs.reduce<number>((sum, d) => sum + gainDb(d, f), 0));
+}
+
 /** Highest gain, in dB, of all filters together (bands and tone shelves; without the preamp). */
 export function peakGain(eq: EQ): number {
-  const filters: Filter[] = [
-    ...eq.bands.map((b): Filter => [b.type, b.frequency, b.q, b.gain]),
-    ["lowshelf", limits.bass_frequency, SHELF_Q, eq.bass], ["highshelf", limits.treble_frequency, SHELF_Q, eq.treble],
-  ].filter(f => f[3] !== 0) as Filter[];
+  const filters = filtersOf(eq);
   if (!filters.length) return 0;
   const designs = filters.map(biquad);
   const total = (hz: number) => designs.reduce<number>((sum, d) => sum + gainDb(d, hz), 0);
@@ -65,10 +74,13 @@ export function peakGain(eq: EQ): number {
   return best;
 }
 
-export function headroom(eq: EQ, _boost = 0) {
+// Rounded like the backend (4 decimals), so the optimistic and the confirmed value agree.
+const round = (value: number) => Math.round(value * 1e4) / 1e4;
+
+export function headroom(eq: EQ) {
   // Only large EQ boosts lower the level; the input level, volume boost and widening never do.
   const excess = peakGain(eq) + Math.min(0, eq.preamp) - ALLOWANCE;
   let compensation = excess > 0 ? -excess : 0;
   compensation = Math.max(compensation, MUTED - eq.preamp);  // The stage cannot go below MUTED.
-  return { compensation, effective_preamp: eq.preamp + compensation };
+  return { compensation: round(compensation), effective_preamp: round(eq.preamp + compensation) };
 }
