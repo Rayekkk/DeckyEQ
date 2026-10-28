@@ -313,11 +313,11 @@ python3, which `npm test` also uses for the native-stage and Linux-only tests).
 
 ```bash
 npm ci
-npm run typecheck  # frontend types
-npm test           # Python backend tests
-npm run test:ui    # UI and lifecycle regressions
-npm run build      # compile the frontend
-npm run package    # build the native stage and frontend, then DeckyEQ-<version>.zip
+npm run typecheck      # frontend types
+npm test               # Python backend tests (on Windows also in WSL)
+npm run test:frontend  # UI and lifecycle regressions
+npm run build          # compile and check the frontend
+npm run package        # build the native stage, then artifacts/DeckyEQ-<version>.zip
 ```
 
 `npm run check` runs all of these in order. The ZIP and its SHA-256 sidecar land in
@@ -352,21 +352,26 @@ LGPL-2.1; its license and source ship in the plugin ZIP.
 ## AI disclaimer
 
 This project was built with substantial help from AI coding assistants. Most of the code,
-tests and documentation were written by AI agents (including Anthropic's Claude Code) working
-under my direction: I defined what each feature should do, made the design and sound
-decisions, reviewed the results and chose what was released.
+tests and documentation were written by AI agents (Anthropic's Claude Code) working under my
+direction: I defined what each feature should do, made the design and sound decisions,
+reviewed the results and chose what was released.
 
 The AI was used to:
 
 - write and refactor the Python backend, the native audio stage and the Decky panel;
-- build the automated test suites for the backend, the audio stage and the panel;
-- audit the code for bugs, security issues and wasted work in independent review passes,
-  with findings checked before they were fixed;
-- write this documentation.
+- build the automated test suites (about 560 tests run on Linux and Windows for every change);
+- audit the code for bugs, security issues and wasted work, with every finding checked by
+  independent review passes and, where possible, reproduced before it was fixed;
+- research how PipeWire and WirePlumber filter, link and report audio, and write this
+  documentation.
 
-Nothing here is untested AI output. The audio changes were measured on my own Legion Go 2
-and checked by ear in Gaming Mode, where the Legion Go 2 preset was also tuned. What has not been checked
-on the device yet is listed under [Requirements](#requirements).
+Nothing here is untested AI output. I tested the plugin on my own Legion Go 2 in Gaming Mode:
+levels measured with and without EQ, every sound change checked by ear (the Legion Go 2 preset
+was tuned there), plugin reloads and updates, PipeWire restarts and games with their own sound.
+Features were held back until they behaved correctly on the real device, and leaving Steam's
+volume and output untouched, with the sound going straight to the speakers whenever the filter
+stops, was kept as a hard requirement. What has not been checked on the device yet is listed
+under [Requirements](#requirements).
 
 Even so, DeckyEQ changes the sound of your console and can make it louder. It is provided as
 is, without warranty (see [License](#license)); use it at your own risk.

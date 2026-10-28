@@ -3,6 +3,7 @@ import ctypes
 import json
 import math
 import operator
+import os
 import random
 import sys
 import unittest
@@ -119,6 +120,9 @@ def true_peak_db(signal):
 class StageTests(unittest.TestCase):
     def setUp(self):
         if not LIBRARY.is_file():
+            # The shared CI's backend job builds no native code; native.yml builds it and requires these tests.
+            if os.environ.get("DECKYEQ_REQUIRE_NATIVE") != "1":
+                self.skipTest("bin/deckyeq_dsp.so is not built (npm run build:native)")
             self.fail(f"{LIBRARY} is missing; run python scripts/build_native.py first.")
         self.stages = []
 

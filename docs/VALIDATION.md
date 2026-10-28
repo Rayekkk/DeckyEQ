@@ -9,11 +9,32 @@ not published releases. The public build includes the later audio and dropdown
 fixes. Its GitHub preparation and updater checks run locally; that prepared
 archive has not been installed on the device.
 
-## 1.1.0 (unreleased)
+## Unreleased (2026-10-28): shared DeckyKit modules
 
-The public update is numbered 1.1.0. The test device still runs the internal
-build 1.1.1, which the in-plugin updater treats as newer, so install 1.1.0 there
-from the ZIP (Decky Settings → General: Developer mode, then Developer → Install Plugin from ZIP).
+Device: Legion Go 2 (83N0, BIOS RRCN16WW), SteamOS 3.9.5 (build 20261023.100), kernel
+7.2.7-valve2, Decky Loader 3.3.1, PipeWire 1.6.8, WirePlumber 0.5.18. Installed through
+Decky's installer from the working tree (55 of 55 files match the ZIP).
+
+- `npm run check` passes on Windows (backend tests also in WSL, where the native stage and
+  POSIX-only tests run); the shared modules' own tests run in DeckyKit.
+- Loading and unloading: stopped in 0.1 s; the 1.1 `settings.last-good.json` became
+  `settings.json.last-good` and the settings loaded unchanged.
+- EQ off and on: the filter process ends and comes back, the default output is unchanged,
+  one DeckyEQ sink at a time. Preset switch, a slider edit (read back), an edit with an old
+  revision refused. A game's own sound: switched in when the game is reported, out when it
+  ends, back when it returns, then forgotten.
+- PipeWire restarted under the filter: rebuilt within 8 s, no log line, default output unchanged.
+- Update check answers `ok` (latest 1.1.0, uploaded by the release workflow).
+- Decky's log for DeckyEQ holds actions and audio state changes only; no warnings besides
+  the deliberately refused edit. The panel renders (QAM screenshot).
+- The owner's settings were restored afterwards and compared with a copy taken before.
+
+## 1.1.0 (released 2026-10-24)
+
+The public update is numbered 1.1.0. Before the release the test device ran the
+internal build 1.1.1, which the in-plugin updater treats as newer, so 1.1.0 was
+installed there from the ZIP (Decky Settings → General: Developer mode, then
+Developer → Install Plugin from ZIP).
 
 - `npm run check` (type checking, Python and UI tests, production build and
   packaging) passes locally and in CI; POSIX-only tests are skipped on Windows

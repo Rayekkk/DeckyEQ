@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
-import { App, EqualizerIcon } from "../src/App";
+import { App } from "../src/App";
+import { EqualizerIcon } from "../src/shared";
 import { Controller } from "../src/controller";
 import { UpdateController } from "../src/updates";
 import { version } from "../package.json";
@@ -9,8 +10,8 @@ import "./style.css";
 const engine = new PreviewEngine();
 const controller = new Controller(engine);
 const updates = new UpdateController({
-  check: async () => ({ success: true, current_version: version, update_available: false, download_available: false, no_release: true }),
-  download: async () => ({ success: false, error: "Downloads are simulated in this preview." }),
+  check: async () => ({ ok: true, current_version: version, update_available: false, download_available: false, no_release: true }),
+  download: async () => ({ ok: false, error: "Downloads are simulated in this preview." }),
 });
 createRoot(document.getElementById("root")!).render(<div className="preview-shell">
   <aside className="preview-context"><div className="preview-kicker">DECKYEQ / {version}</div>

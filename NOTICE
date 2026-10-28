@@ -1,12 +1,13 @@
 DeckyEQ is an independent Decky Loader plugin by Rayek.
 
 The release checker, verified ZIP downloader and update interface are adapted
-from Rayekkk/SpotiDeck and Rayekkk/LegionGo2Companion, under BSD-3-Clause.
+from Rayekkk/SpotiDeck and Rayekkk/LegionGo2Companion, under BSD-3-Clause; the
+dk_*.py modules are shared with the author's other Decky plugins.
 Copyright (c) 2026 Rayekkk. See LICENSE.
 
 The production JavaScript bundle incorporates @decky/api 1.1.3, licensed under
 LGPL-2.1. Its license and the complete installed package source are included in
-the distribution's THIRD_PARTY_LICENSES and THIRD_PARTY_SOURCES directories.
+the distribution's third_party/decky-api directory.
 DeckyEQ's TypeScript source, lockfile and build configuration are included so
 the bundle can be rebuilt with a modified API package.
 

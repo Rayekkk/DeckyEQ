@@ -259,7 +259,7 @@ class GraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(temp)
             store.save(state)
-            self.assertGreater((Path(temp) / "settings.json").stat().st_size, 512 * 1024)
+            self.assertGreater((Path(temp) / "settings.json").stat().st_size, 384 * 1024)
             store.save(state)  # Refreshes the backup from the large file.
             self.assertEqual(store.load()["games"], state["games"])
 
@@ -278,7 +278,8 @@ class GraphTests(unittest.TestCase):
             state["working"] = flat_eq()
             store.save(state)
             self.assertNotIn("width", json.loads(store.path.read_text(encoding="utf-8"))["working"])
-            self.assertEqual(json.loads(store.backup.read_text(encoding="utf-8"))["working"]["width"], 1.5)
+            # The last-good copy is the content just written (dk_fs), so a recovery loses no edit.
+            self.assertNotIn("width", json.loads(store.backup.read_text(encoding="utf-8"))["working"])
             self.assertEqual(store.load()["working"], flat_eq())
 
     def test_shelf_q_is_capped_where_it_would_resonate(self):
@@ -386,15 +387,44 @@ class StorageTests(unittest.TestCase):
         self.store = Store(self.home / "settings")
         self.files = PresetFiles(self.home)
 
-    def test_save_and_recover_previous_good_state(self):
+    def test_save_and_recover_the_last_good_state(self):
         state = initial_state()
         self.store.save(state)
         state["working"]["bass"] = 3
         self.store.save(state)
         self.store.path.write_text("{broken", encoding="utf-8")
-        self.assertEqual(self.store.load()["working"]["bass"], 0)
+        self.assertEqual(self.store.load()["working"]["bass"], 3)
         self.assertIn("Recovered", self.store.warning)
-        self.assertEqual(self.store.path.read_text(), "{broken")
+        self.assertEqual(self.store.load()["working"]["bass"], 3, "the file itself is repaired")
+        kept = list(self.store.directory.glob("settings.json.corrupt-*"))
+        self.assertEqual([p.read_text() for p in kept], ["{broken"], "the damaged bytes are kept aside")
+
+    def test_an_unreadable_settings_file_starts_from_the_last_good_copy_without_writing(self):
+        state = initial_state()
+        state["working"]["bass"] = 4
+        self.store.save(state)
+        before = self.store.path.read_bytes()
+        with patch("dk_fs.load_json", side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(self.store.load()["working"]["bass"], 4)
+        self.assertIn("Recovered", self.store.warning)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.store.backup.unlink()
+        with patch("dk_fs.load_json", side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaisesRegex(EQError, "^Settings could not be read"):
+                self.store.load()
+
+    def test_the_backup_of_deckyeq_1_1_is_used_once_after_the_update(self):
+        # 1.0 and 1.1 kept the previous good settings as settings.last-good.json.
+        state = initial_state()
+        state["working"]["bass"] = 2
+        directory = self.home / "old"
+        directory.mkdir()
+        (directory / "settings.last-good.json").write_text(json.dumps(state), encoding="utf-8")
+        (directory / "settings.json").write_text("{broken", encoding="utf-8")
+        store = Store(directory)
+        self.assertEqual(store.load()["working"]["bass"], 2)
+        self.assertIn("Recovered", store.warning)
+        self.assertFalse((directory / "settings.last-good.json").exists())
 
     def test_a_saved_user_preset_named_like_a_factory_preset_loads_untouched(self):
         state = initial_state()
@@ -433,9 +463,9 @@ class StorageTests(unittest.TestCase):
         old = self.store.path.read_bytes()
         state["enabled"] = True
         original = os.replace
-        def fail_primary(src, dst):
-            if Path(dst) == self.store.path: raise OSError("disk error")
-            return original(src, dst)
+        def fail_primary(src, dst, **kwargs):  # POSIX dk_fs renames inside the opened folder (dst is a bare name).
+            if Path(dst).name == "settings.json": raise OSError("disk error")
+            return original(src, dst, **kwargs)
         with patch("deckyeq.storage.os.replace", side_effect=fail_primary):
             with self.assertRaisesRegex(EQError, r"^Settings could not be saved\. Check free space\.$"): self.store.save(state)
         self.assertEqual(self.store.path.read_bytes(), old)
@@ -457,6 +487,7 @@ class StorageTests(unittest.TestCase):
             with patch("deckyeq.storage.os.open", side_effect=error):
                 with self.assertRaisesRegex(EQError, r"^Cannot save there\. Choose another folder\.$"):
                     self.files.write(document, "Flat")
+        (self.home / "x.json").write_text("{}")
         with patch("deckyeq.storage.os.open", side_effect=PermissionError(13, "Permission denied", str(self.home / "x.json"))):
             with self.assertRaisesRegex(EQError, r"^That file cannot be read\. Choose another one\.$"):
                 self.files.read(str(self.home / "x.json"))

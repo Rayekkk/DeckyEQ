@@ -7,7 +7,7 @@ const installed = new RegExp(`Installed version: ${version.replace(/\./g, "\.")}
 
 const sessions: UpdateController[] = [];
 afterEach(() => { cleanup(); sessions.splice(0).forEach(session => session.dispose()); });
-const available: UpdateCheck = { success: true, current_version: "1.0.0", latest_version: "1.0.1", update_available: true, download_available: true, size: 2097152 };
+const available: UpdateCheck = { ok: true, current_version: "1.0.0", latest_version: "1.0.1", update_available: true, download_available: true, size: 2097152 };
 function setup(client: UpdateClient = {
   check: vi.fn().mockResolvedValue({ ...available, no_release: true, update_available: false, download_available: false }),
   download: vi.fn(),
@@ -46,7 +46,7 @@ it("downloads the selected version once and retains progress across page remount
   const reopened = render(<UpdateSection controller={controller} />);
   expect((screen.getByRole("button", { name: "Check for updates" }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByText("Downloading ZIP…")).toBeTruthy();
-  await act(async () => pending.resolve({ success: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }));
+  await act(async () => pending.resolve({ ok: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }));
   expect(screen.getByText("/home/deck/Downloads/DeckyEQ-1.0.1.zip")).toBeTruthy();
   expect(screen.getByText(/Turn on Developer mode in Decky Settings → General, then Developer → Install Plugin from ZIP\./)).toBeTruthy();
   expect(screen.getByText("Ready to install")).toBeTruthy();
@@ -60,7 +60,7 @@ it("does not offer a download for equal, older or unverifiable releases", async 
   setup({ check: vi.fn()
     .mockResolvedValueOnce({ ...available, latest_version: "1.0.0", update_available: false, download_available: false })
     .mockResolvedValueOnce({ ...available, latest_version: "0.9.0", update_available: false, download_available: false })
-    .mockResolvedValueOnce({ ...available, download_available: false, error: "Missing trusted digest." }), download: vi.fn() });
+    .mockResolvedValueOnce({ ...available, download_available: false, message: "Missing trusted digest." }), download: vi.fn() });
   await click("Check for updates");
   expect(screen.getByText("Up to date")).toBeTruthy();
   await click("Check for updates");
@@ -78,7 +78,7 @@ it("serializes repeated checks and allows retry after an error", async () => {
   await click("Check for updates");
   await act(async () => { void controller.run("check"); });
   expect(client.check).toHaveBeenCalledOnce();
-  await act(async () => pending.resolve({ ...available, success: false, error: "GitHub rate limit reached." }));
+  await act(async () => pending.resolve({ ...available, ok: false, error: "GitHub rate limit reached." }));
   expect(screen.getByRole("alert").textContent).toMatch(/rate limit/);
   client.check.mockResolvedValue(available);
   await click("Check for updates");
@@ -88,8 +88,8 @@ it("serializes repeated checks and allows retry after an error", async () => {
 
 it("does not treat a failed or mismatched download as completed", async () => {
   setup({ check: vi.fn().mockResolvedValue(available), download: vi.fn()
-    .mockResolvedValueOnce({ success: false, error: "Release changed. Check again." })
-    .mockResolvedValueOnce({ success: true, version: "1.0.2", path: "/wrong.zip" }) });
+    .mockResolvedValueOnce({ ok: false, error: "Release changed. Check again." })
+    .mockResolvedValueOnce({ ok: true, version: "1.0.2", path: "/wrong.zip" }) });
   await click("Check for updates");
   await click("Download 1.0.1");
   expect(screen.getByRole("alert").textContent).toMatch(/Release changed/);
@@ -112,7 +112,7 @@ it("ignores completion from an unloaded plugin session", async () => {
 
 it("removes a stale download notice when the public release changes", async () => {
   const client = { check: vi.fn().mockResolvedValue(available),
-    download: vi.fn().mockResolvedValue({ success: true, version: "1.0.1", path: "/Downloads/DeckyEQ-1.0.1.zip" }) };
+    download: vi.fn().mockResolvedValue({ ok: true, version: "1.0.1", path: "/Downloads/DeckyEQ-1.0.1.zip" }) };
   setup(client);
   await click("Check for updates");
   await click("Download 1.0.1");
@@ -134,7 +134,7 @@ it("drops an old offer when a later check fails", async () => {
 
 it("describes each state in a line, without repeating what the button says", async () => {
   const client = { check: vi.fn().mockResolvedValueOnce({ ...available, no_release: true, update_available: false, download_available: false })
-    .mockResolvedValueOnce(available), download: vi.fn().mockResolvedValue({ success: true, version: "1.0.1", path: "/Downloads/DeckyEQ-1.0.1.zip" }) };
+    .mockResolvedValueOnce(available), download: vi.fn().mockResolvedValue({ ok: true, version: "1.0.1", path: "/Downloads/DeckyEQ-1.0.1.zip" }) };
   setup(client);
   expect(screen.getByText("Not checked yet")).toBeTruthy();
   expect(screen.getByText(`Installed version: ${version}.`)).toBeTruthy();
@@ -149,7 +149,7 @@ it("describes each state in a line, without repeating what the button says", asy
 
 it("says the check failed after a failed check, and shows the ZIP from the home folder", async () => {
   const client = { check: vi.fn().mockRejectedValueOnce(new Error("rate limit")).mockResolvedValue(available),
-    download: vi.fn().mockResolvedValue({ success: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }) };
+    download: vi.fn().mockResolvedValue({ ok: true, version: "1.0.1", path: "/home/deck/Downloads/DeckyEQ-1.0.1.zip" }) };
   const controller = new UpdateController(client);
   sessions.push(controller);
   render(<UpdateSection controller={controller} home="/home/deck" />);

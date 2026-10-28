@@ -1,14 +1,17 @@
-"""Atomic private storage and explicit, bounded preset file exchange."""
+"""Private settings on dk_fs and explicit, bounded preset file exchange inside the home folder."""
 from __future__ import annotations
 
 import json
 import os
 import re
-import stat
-import tempfile
 from pathlib import Path
 
+import dk_fs
+
 from .model import EQError, MAX_IMPORT_BYTES, initial_state, portable_state, validate_state
+
+MAX_SETTINGS_BYTES = 4 * 1024 * 1024  # 64 presets and 200 game sounds stay under 1 MiB.
+LEGACY_BACKUP = "settings.last-good.json"  # DeckyEQ 1.0-1.1: the previous good settings.
 
 
 def safe_directory(path: Path):
@@ -25,76 +28,50 @@ def safe_directory(path: Path):
 
 
 def atomic_json(path: Path, value):
+    """A private JSON file with no last-good copy (the filter's config, the 1.0 journal: a copy would bring a
+    deleted journal back)."""
     safe_directory(path.parent)
-    if path.is_symlink():
-        raise EQError("Refusing to replace a symbolic link.")
     text = json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n"
-    fd, temp = tempfile.mkstemp(prefix="." + path.name, dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-        if hasattr(os, "O_DIRECTORY"):  # Make the rename itself durable (POSIX).
-            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-    finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
-
-
-def read_json(path: Path, limit=4 * 1024 * 1024):  # Settings with 64 presets and 200 game sounds stay under 1 MiB.
-    if path.is_symlink():
-        raise EQError("Symbolic link files are not supported.")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    fd = os.open(path, flags)
-    with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise EQError("Choose a regular file.")
-        raw = handle.read(limit + 1)
-    if len(raw) > limit:
-        raise EQError("File size limit exceeded.")
-    return json.loads(raw.decode("utf-8-sig"))
+    dk_fs.write_atomic(str(path), text.encode("utf-8"), 0o600, no_links=True)
 
 
 class Store:
     def __init__(self, directory):
         self.directory = safe_directory(Path(directory))
         self.path = self.directory / "settings.json"
-        self.backup = self.directory / "settings.last-good.json"
+        self.backup = Path(str(self.path) + dk_fs.LAST_GOOD)
         self.warning = None
+        legacy = self.directory / LEGACY_BACKUP
+        if legacy.is_file() and not legacy.is_symlink() and not os.path.lexists(self.backup):
+            try:  # One save behind, so a recovery from it still asks the user to check their latest edits.
+                os.replace(legacy, self.backup)
+            except OSError:
+                pass  # The first read or write makes a copy of the current settings instead.
 
     def load(self):
-        if not self.path.exists() and not self.path.is_symlink() and not self.backup.exists():
-            return initial_state()
-        for path in (self.path, self.backup):
-            try:
-                result = validate_state(read_json(path))
-                if path == self.backup:
-                    self.warning = "Recovered the last good settings. Check your most recent edits."
-                return result
-            except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
-                continue
-        raise EQError("Settings could not be read. Existing files were preserved; restore a valid backup before editing.")
-
-    def save(self, state, backup=True):
-        state = validate_state(state)
-        # Commit the authoritative file last. A failed write never changes live state.
-        # The backup tracks the previously committed state, never a proposed write.
         try:
-            if backup and self.path.exists():
-                try:
-                    old = validate_state(read_json(self.path))
-                except (OSError, ValueError, UnicodeError, RecursionError):
-                    old = None
-                if old is not None:
-                    atomic_json(self.backup, portable_state(old))
-            atomic_json(self.path, portable_state(state))
-        except OSError:  # E.g. a full disk. No path in the message, which names the user (see PresetFiles.read).
+            loaded = dk_fs.load_json(str(self.path), limit=MAX_SETTINGS_BYTES, validate=validate_state, no_links=True)
+        except OSError:  # E.g. no permission or a full disk while repairing: nothing more is touched.
+            try:  # Start from the last good copy without writing anything, as 1.1 did.
+                saved = dk_fs.parse_json(dk_fs.read_bytes(str(self.backup), MAX_SETTINGS_BYTES, no_links=True),
+                                         validate_state)
+            except (OSError, ValueError):
+                raise EQError("Settings could not be read. Existing files were preserved.") from None
+            self.warning = "Recovered the last good settings. Check your most recent edits."
+            return validate_state(saved)
+        if loaded.status == "missing":
+            return initial_state()
+        if loaded.status == "lost":
+            raise EQError("Settings could not be read. Existing files were preserved; restore a valid backup before editing.")
+        if loaded.status == "recovered":
+            self.warning = "Recovered the last good settings. Check your most recent edits."
+        return validate_state(loaded.value)  # As validated: settings from 1.0 come back in the current format.
+
+    def save(self, state):
+        state = validate_state(state)
+        try:  # The file, then its last-good copy; a failed write never changes live state.
+            dk_fs.write_json(str(self.path), portable_state(state), limit=MAX_SETTINGS_BYTES, no_links=True)
+        except (OSError, ValueError):  # E.g. a full disk. No path in the message, which names the user (see PresetFiles.read).
             raise EQError("Settings could not be saved. Check free space.") from None
 
 
@@ -133,21 +110,17 @@ class PresetFiles:
         path = self._inside_home(path)
         if path.suffix.lower() != ".json":
             raise EQError("Choose a .json preset file.")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         # Short messages without the path, which names the user: toasts can be seen on a stream.
         try:
-            fd = os.open(path, flags)
-            if not stat.S_ISREG(os.fstat(fd).st_mode):  # Before fdopen, which refuses a folder by its fd number.
-                os.close(fd)
-                raise EQError("Choose a regular preset file.")
-            with os.fdopen(fd, "rb") as handle:
-                raw = handle.read(MAX_IMPORT_BYTES + 1)
+            raw = dk_fs.read_bytes(str(path), MAX_IMPORT_BYTES, no_links=True)
         except (FileNotFoundError, NotADirectoryError):
             raise EQError("That file is no longer there. Choose another one.") from None
+        except dk_fs.UnsafePath:
+            raise EQError("Choose a regular preset file.") from None
         except OSError:
             raise EQError("That file cannot be read. Choose another one.") from None
-        if len(raw) > MAX_IMPORT_BYTES:
-            raise EQError(f"Preset files must be no larger than {MAX_IMPORT_BYTES // 1024} KiB.")
+        except dk_fs.Damaged:
+            raise EQError(f"Preset files must be no larger than {MAX_IMPORT_BYTES // 1024} KiB.") from None
         try:
             return raw.decode("utf-8-sig")
         except UnicodeError:
@@ -160,9 +133,10 @@ class PresetFiles:
         try:  # E.g. no permission, a read-only card, a full disk: no path in the message (see read()).
             safe_directory(folder)
             for index in range(1, 1001):
+                # O_EXCL: an export never replaces a file (dk_fs only has replacing writes).
                 path = folder / f"{slug}{'' if index == 1 else '-' + str(index)}.json"
                 try:
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 except FileExistsError:
                     continue
                 try:

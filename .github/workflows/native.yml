@@ -1,0 +1,36 @@
+# DeckyEQ's own job next to the shared checks.yml (DeckyKit STANDARD §6): the LADSPA audio stage in C.
+# The shared backend job builds no native code, so its tests skip the stage; here they must run.
+name: Native stage
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Audio stage builds with -Werror and passes its tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Compile the stage
+        run: python scripts/build_native.py
+      - name: Check the export
+        run: nm -D --defined-only bin/deckyeq_dsp.so | grep -q ' ladspa_descriptor$'
+      - name: Run the stage's tests
+        env:
+          DECKYEQ_REQUIRE_NATIVE: '1'
+        run: python -W error -m unittest discover -s tests -p "test_dsp.py"

@@ -1,7 +1,9 @@
 name: Release DeckyEQ
 # Push a tag such as 1.1.0 (no "v", like the other plugins). CI builds and tests the ZIP without write access, attests where it
 # was built, and creates a DRAFT release. Publish the draft after the hardware checks in
-# docs/VALIDATION.md; the in-plugin updater only sees published releases.
+# docs/VALIDATION.md; the in-plugin updater only sees published releases. The installed 1.0 and 1.1 updaters
+# accept only an asset that github-actions[bot] uploaded, so a release ZIP must come from this workflow.
+# scripts/package.mjs (in npm run check) refuses a tag that differs from the version or CHANGELOG's top section.
 on:
   push:
     tags: ["*.*.*"]
@@ -22,8 +24,6 @@ jobs:
           python-version: '3.11'
       # No dependency install scripts run, except esbuild's binary check needed by Vitest.
       - run: npm ci --ignore-scripts && npm rebuild esbuild
-      - name: Tag must match the plugin version
-        run: test "$(node -p "require('./plugin.json').version")" = "$GITHUB_REF_NAME"
       - run: npm run check
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -14,16 +14,18 @@ import platform
 import re
 import shutil
 import signal
-import stat
 import subprocess
 import time
 import uuid
 from pathlib import Path
 
+import dk_fs
+import dk_process
+
 from .graph import (LEGACY_SINK_NAME, LEVEL, MUTED, PLAYBACK_NAME, SINK_NAME, STAGE_LIBRARY, controls, control_payload,
                     filter_config, neutral, read_controls, same_controls)
 from .model import EQError, NodeGone, OutputGone, ToolError, flat_eq
-from .storage import atomic_json, read_json, safe_directory
+from .storage import atomic_json, safe_directory
 
 TOOLS = ("pipewire", "pw-cli", "pw-dump", "pactl", "python3")
 UNITY_VOLUME = 65536  # PulseAudio's native 100% volume, independent of locale.
@@ -44,26 +46,9 @@ REGISTRY_MISS = re.compile(r'remote \d+: error id:\d+ seq:\d+ res:-2 \(No such f
 
 
 def environment():
-    env = os.environ.copy()
-    # Decky is a frozen application. Do not load its bundled shared libraries
-    # into system tools or accidentally start another copy of PluginLoader.
-    if "LD_LIBRARY_PATH_ORIG" in env:
-        env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
-    else:
-        env.pop("LD_LIBRARY_PATH", None)
-    env["LC_ALL"] = "C"  # Untranslated pactl events and messages, and JSON numbers with a decimal point.
-    if platform.system() == "Linux":
-        import pwd
-        uid = os.geteuid()
-        env["HOME"] = pwd.getpwuid(uid).pw_dir
-        runtime = f"/run/user/{uid}"
-        try:
-            info = os.stat(runtime)
-            if stat.S_ISDIR(info.st_mode) and info.st_uid == uid:
-                env["XDG_RUNTIME_DIR"] = runtime
-        except OSError:
-            pass
-    return env
+    # The user's audio session, without Decky's bundled libraries; untranslated pactl events and messages,
+    # JSON numbers with a decimal point and device names in UTF-8.
+    return dk_process.session_env(LC_ALL="C.UTF-8")
 
 
 def active_port(sink):
@@ -182,6 +167,8 @@ class Runtime:
                 bounded(proc.stdout, 8 * 1024 * 1024), bounded(proc.stderr, 65536), proc.wait()), timeout)
             errors = "\n".join(line for line in err.decode("utf-8", "replace").splitlines()
                                if not REGISTRY_MISS.fullmatch(line.strip()))
+            # pw-cli exits 0 when a write fails. Edits are confirmed by reading them back anyway, but a write to a
+            # suspended node and the mute in stop() have only this to go on.
             if code or (tool == "pw-cli" and re.search(r"error|failed|unknown global", errors, re.I)):
                 raise ToolError(f"{tool}: {(errors.strip() or 'audio command failed')[:240]}")
             return out.decode("utf-8", "strict")
@@ -204,13 +191,13 @@ class Runtime:
             subscriber = self.subscriber = None
             if self.supported:
                 try:
-                    # Through the worker, like the filter: it ends with the plugin even if Decky is killed.
+                    # Like the filter: it ends with the plugin even if Decky is killed.
                     subscriber = self.subscriber = await asyncio.create_subprocess_exec(
-                        self.tools["python3"], "-I", str(Path(__file__).with_name("worker.py")), str(os.getpid()),
-                        self.tools["pactl"], "subscribe", env=self.env, stdin=asyncio.subprocess.DEVNULL,
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                        *dk_process.spawn_argv([self.tools["pactl"], "subscribe"], self.env), env=self.env,
+                        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL)
                 except OSError:
-                    pass
+                    pass  # Polled below instead; the next call tries to subscribe again.
         if subscriber is None:
             await asyncio.sleep(POLL_SECONDS if self.supported else timeout)
             return True
@@ -268,13 +255,13 @@ class Runtime:
         if self.target and self.supported:
             # Like stop(): Steam's output goes back to the filter's own output, not to any fallback. Blocking
             # but bounded, since nothing awaited here would finish.
-            pactl = lambda *args: subprocess.run([self.tools["pactl"], *args], env=self.env, stdin=subprocess.DEVNULL,
-                                                 capture_output=True, check=True, timeout=HANDOFF_SECONDS).stdout
+            pactl = lambda *args: dk_process.run([self.tools["pactl"], *args], HANDOFF_SECONDS, env=self.env,
+                                                 capture_output=True, check=True).stdout
             try:
-                if pactl("get-default-sink").decode("utf-8", "replace").strip() == SINK_NAME:
+                if pactl("get-default-sink").strip() == SINK_NAME:
                     pactl("set-default-sink", self.target)
             except (OSError, subprocess.SubprocessError):
-                pass
+                pass  # Decky is stopping us: WirePlumber picks an output itself, as after a crash.
             self.target = None  # Once: Decky 3.3 unloads us again for _uninstall, within the same ~5 s.
         for proc in (self.process, self.subscriber):
             if proc is not None and proc.returncode is None:
@@ -374,7 +361,7 @@ class Runtime:
 
     def _read_journal(self):
         """Return (previous default, restore entries). Version 1/2 journals have no port."""
-        saved = read_json(self.journal)
+        saved = dk_fs.parse_json(dk_fs.read_bytes(str(self.journal), no_links=True))
         if not isinstance(saved, dict) or saved.get("version") not in (1, 2, 3):
             raise EQError("Invalid audio restoration journal.")
         previous = saved.get("previous")
@@ -470,9 +457,9 @@ class Runtime:
         child_env["PIPEWIRE_CONFIG_DIR"] = str(self.directory)
         child_env["PIPEWIRE_CONFIG_PREFIX"] = ""
         child_env.pop("PIPEWIRE_CONFIG_NAME", None)
+        # Ends with the plugin even if Decky is killed (parent-death signal, dk_process).
         self.process = await asyncio.create_subprocess_exec(
-            self.tools["python3"], "-I", str(Path(__file__).with_name("worker.py")), str(os.getpid()),
-            self.tools["pipewire"], "-c", self.config.name, env=child_env,
+            *dk_process.spawn_argv([self.tools["pipewire"], "-c", self.config.name], child_env), env=child_env,
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE, start_new_session=True)
         self.reader = asyncio.create_task(self._log_reader())
@@ -615,7 +602,7 @@ class Runtime:
                 if (await self.run("pactl", "get-default-sink")).strip() == SINK_NAME:
                     await self.run("pactl", "set-default-sink", self.target)
             except Exception:
-                pass
+                pass  # Best effort: WirePlumber picks an output itself, and the filter must end regardless.
         if self.running and not mute:
             try:  # Back to neutral first, so playing on without the filter sounds the same.
                 await self._write(neutral(), use_cache=False)
@@ -631,7 +618,7 @@ class Runtime:
                 await asyncio.wait_for(self.process.wait(), TERMINATE_SECONDS)
             except asyncio.TimeoutError:
                 try:
-                    # The worker leads its own session; kill the group so nothing can linger.
+                    # The filter leads its own session; kill the group so nothing can linger.
                     if hasattr(os, "killpg") and self.process.returncode is None:
                         os.killpg(self.process.pid, signal.SIGKILL)
                     else:

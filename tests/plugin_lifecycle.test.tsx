@@ -41,10 +41,10 @@ let engine: PreviewEngine;
 beforeEach(() => {
   decky.visible = true;
   decky.selections.clear();
-  decky.checkUpdates.mockReset().mockResolvedValue({ success: true, current_version: "1.0.0", update_available: false, download_available: false, no_release: true });
+  decky.checkUpdates.mockReset().mockResolvedValue({ ok: true, current_version: "1.0.0", update_available: false, download_available: false, no_release: true });
   decky.downloadUpdate.mockReset();
   engine = new PreviewEngine();
-  decky.status.mockReset().mockImplementation(() => engine.status());
+  decky.status.mockReset().mockImplementation(async () => ({ ok: true, state: await engine.status() }));
   decky.perform.mockReset().mockImplementation((...args: Parameters<PreviewEngine["perform"]>) => engine.perform(...args));
   decky.setGame.mockReset().mockImplementation((...args: Parameters<PreviewEngine["setGame"]>) => engine.setGame(...args));
   delete Router.MainRunningApp;
@@ -173,6 +173,27 @@ it("says it only for the first refusal of a game, not for every retry", async ()
   expect(toaster.toast).toHaveBeenCalledOnce();  // ... quietly.
 });
 
+it("tries again on the next tick when the backend is still starting", async () => {
+  vi.mocked(toaster.toast).mockClear();
+  await setup(true);
+  decky.setGame.mockResolvedValueOnce({ ok: false, error: "DeckyEQ is still starting. Try again.", starting: true });
+  Router.MainRunningApp = celeste;
+  await tick(4000);
+  expect(decky.setGame).toHaveBeenCalledTimes(2);
+  await tick(2000);
+  expect(decky.setGame).toHaveBeenCalledTimes(3);  // Two seconds later, not thirty, and no toast.
+  expect(decky.setGame).toHaveBeenLastCalledWith("7", "Celeste");
+  expect(vi.mocked(toaster.toast).mock.calls.filter(call => /game's sound/.test(String(call[0]?.body)))).toEqual([]);
+});
+
+it("shows why the backend refused its status, then recovers on the next poll", async () => {
+  decky.status.mockResolvedValueOnce({ ok: false, error: "DeckyEQ is still starting. Try again.", starting: true });
+  await setup(true);
+  expect(screen.getByText(/DeckyEQ is still starting/)).toBeTruthy();
+  await tick(5000);
+  expect(screen.getByRole("combobox", { name: "Preset" })).toBeTruthy();
+});
+
 it("tries again on the next tick when the backend did not answer the game at all", async () => {
   await setup(true);
   decky.setGame.mockRejectedValueOnce(new Error("not up yet"));
@@ -295,7 +316,7 @@ it("keeps updates in About and retains a requested result while QAM is hidden", 
   decky.checkUpdates.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
   fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   visibility(false);
-  await act(async () => resolve({ success: true, current_version: "1.0.0", update_available: false, download_available: false, no_release: true }));
+  await act(async () => resolve({ ok: true, current_version: "1.0.0", update_available: false, download_available: false, no_release: true }));
   visibility(true);
   expect(screen.getByText("No public release yet")).toBeTruthy();
   expect(decky.checkUpdates).toHaveBeenCalledOnce();

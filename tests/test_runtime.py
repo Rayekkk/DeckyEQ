@@ -20,6 +20,9 @@ from deckyeq.service import Service
 from deckyeq.storage import PresetFiles, Store
 
 
+WRAPPER = "<parent-death wrapper>"
+
+
 def flat_eq():
     return factory_flat_eq()
 
@@ -153,6 +156,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.mock_spawn = self.spawn.start()
         self.addCleanup(self.spawn.stop)
         self.mock_spawn.side_effect = lambda *a, **kw: Process()
+        # dk_process's parent-death wrapper (tested in test_dk_process); a Linux path is not absolute on Windows.
+        wrap = patch("deckyeq.runtime.dk_process.spawn_argv", side_effect=lambda argv, env: [WRAPPER, *argv])
+        self.mock_wrap = wrap.start()
+        self.addCleanup(wrap.stop)
 
     async def start(self):
         await self.runtime.start(flat_eq(), "alsa_output.speaker")
@@ -169,9 +176,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.writes(), [])
         self.assertEqual((self.runtime.mock_default, self.runtime.sinks, self.runtime.streams), before)
         args, kwargs = self.mock_spawn.call_args
-        self.assertEqual(args[:2], ("/usr/bin/python3", "-I"))
-        self.assertTrue(args[2].endswith("worker.py"))
-        self.assertEqual(args[4:], ("/usr/bin/pipewire", "-c", "deckyeq.conf"))
+        # Ends with the plugin: started through dk_process's parent-death wrapper.
+        self.assertEqual(args, (WRAPPER, "/usr/bin/pipewire", "-c", "deckyeq.conf"))
+        self.assertIs(self.mock_wrap.call_args.args[1], kwargs["env"])
         self.assertEqual(kwargs["env"]["PIPEWIRE_CONFIG_DIR"], str(self.runtime.directory))
         self.assertTrue(kwargs["start_new_session"])
         self.assertNotIn("shell", kwargs)
@@ -200,10 +207,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         def pactl(command, **kwargs):
             calls.append((*command[1:], kwargs["timeout"]))
-            return subprocess.CompletedProcess(command, 0, (default + "\n").encode(), b"")
+            return subprocess.CompletedProcess(command, 0, default + "\n", "")
         process = self.runtime.process
         process.send_signal = lambda _: calls.append("SIGTERM")
-        with patch("deckyeq.runtime.subprocess.run", side_effect=pactl):
+        with patch("dk_process.subprocess.run", side_effect=pactl):
             default = "bluez_output.headset"  # Steam plays elsewhere: left alone.
             self.runtime.abandon()
             self.assertEqual(calls, [("get-default-sink", 1), "SIGTERM"])
@@ -220,7 +227,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         process, signals = self.runtime.process, []
         process.send_signal = signals.append
-        with patch("deckyeq.runtime.subprocess.run", side_effect=subprocess.TimeoutExpired("pactl", 1)):
+        with patch("dk_process.subprocess.run", side_effect=subprocess.TimeoutExpired("pactl", 1)):
             self.runtime.abandon()
         self.assertEqual(signals, [signal.SIGTERM])
         process.returncode = 0
@@ -503,8 +510,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         started = time.monotonic()
         self.assertTrue(await self.runtime.wait_for_change(5))
         self.assertLess(time.monotonic() - started, 1)
-        self.assertEqual(self.mock_spawn.call_args.args[-2:], ("/usr/bin/pactl", "subscribe"))
-        self.assertTrue(str(self.mock_spawn.call_args.args[2]).endswith("worker.py"))  # Ends with the plugin.
+        self.assertEqual(self.mock_spawn.call_args.args, (WRAPPER, "/usr/bin/pactl", "subscribe"))  # Ends with the plugin.
         self.assertEqual(self.mock_spawn.call_count, 1)  # One long-lived subscription.
         subscriber.stdout.feed_eof()
         with patch("deckyeq.runtime.POLL_SECONDS", 0):
@@ -925,24 +931,11 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(sink_level(sink), {"values": [18000, 22000], "mute": False})
 
     def test_system_tools_do_not_inherit_frozen_loader_libraries(self):
-        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/frozen-libraries"}, clear=True):
-            self.assertNotIn("LD_LIBRARY_PATH", environment())
-        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/frozen-libraries", "LD_LIBRARY_PATH_ORIG": "/system-libraries"}, clear=True):
+        # The rest (HOME, the user's own XDG_RUNTIME_DIR) is dk_process.session_env's, tested with it.
+        with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/frozen-libraries", "LD_LIBRARY_PATH_ORIG": "/x"}, clear=True):
             clean = environment()
-            self.assertEqual(clean["LD_LIBRARY_PATH"], "/system-libraries")
+            self.assertNotIn("LD_LIBRARY_PATH", clean)
             self.assertNotIn("LD_LIBRARY_PATH_ORIG", clean)
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "pwd and /run/user are Linux")
-    def test_another_users_runtime_directory_is_not_used(self):
-        uid, real_stat = os.geteuid(), os.stat
-        for owner, used in ((uid, True), (uid + 1, False)):
-            def fake(path, *args, **kwargs):
-                if path == f"/run/user/{uid}":
-                    return os.stat_result((stat.S_IFDIR | 0o700, 0, 0, 0, owner, 0, 0, 0, 0, 0))
-                return real_stat(path, *args, **kwargs)
-            with self.subTest(owner=owner), patch.dict(os.environ, {}, clear=True), \
-                    patch("deckyeq.runtime.os.stat", side_effect=fake):
-                self.assertEqual("XDG_RUNTIME_DIR" in environment(), used)
 
     def test_audio_is_unsupported_as_root(self):
         # Settings and the filter's files written as root would lock the user out of them.
@@ -956,7 +949,7 @@ class OutputTests(unittest.TestCase):
     def test_tools_run_untranslated(self):
         # pactl translates its event lines ("Event 'change' on sink #1"), which the monitor matches.
         with patch.dict(os.environ, {"LANG": "pl_PL.UTF-8", "LC_ALL": "pl_PL.UTF-8"}, clear=True):
-            self.assertEqual(environment()["LC_ALL"], "C")
+            self.assertEqual(environment()["LC_ALL"], "C.UTF-8")
 
     def test_deckyeq_outputs_are_never_offered_as_targets(self):
         sinks = [{"name": name, "active_port": "speaker"} for name in (SINK_NAME, "deckyeq.sink", "alsa_output.x")]

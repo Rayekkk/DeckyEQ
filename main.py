@@ -1,4 +1,6 @@
-"""Decky entry point. The reusable EQ engine lives entirely in deckyeq/."""
+"""Decky entry point. The reusable EQ engine lives entirely in deckyeq/.
+
+Every RPC answers {ok, error?, state?, ...} (DeckyKit D2, dk_rpc): `state` is Service.snapshot()."""
 from __future__ import annotations
 
 import asyncio
@@ -12,10 +14,17 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 
-from deckyeq.runtime import Runtime, environment
-from deckyeq.service import VERSION, Service
-from deckyeq.storage import PresetFiles, Store
-from deckyeq.updates import PluginUpdates
+import dk_rpc  # noqa: E402
+import dk_update  # noqa: E402
+from deckyeq.model import EQError  # noqa: E402
+from deckyeq.runtime import Runtime  # noqa: E402
+from deckyeq.service import VERSION, Service  # noqa: E402
+from deckyeq.storage import PresetFiles, Store  # noqa: E402
+
+REPOSITORY = "Rayekkk/DeckyEQ"
+STARTING = "DeckyEQ is still starting. Try again."
+# No ready event here: Decky may start _main again on the same instance, so each start has its own gate (_wait).
+rpc = dk_rpc.boundary(decky.logger)
 
 
 class Plugin:
@@ -35,7 +44,13 @@ class Plugin:
             previous_updates = getattr(self, "_updates", None)
             if previous_updates:
                 previous_updates.close()
-            self._updates = PluginUpdates.for_plugin(PLUGIN_DIR)
+            home = getattr(decky, "DECKY_USER_HOME", None) or str(Path.home())
+            # Installed 1.0 and 1.1 updaters accept only what this one also requires: the release workflow's
+            # asset of a plugin that never asks for root.
+            self._updates = dk_update.Updates(
+                repo=REPOSITORY, folder="DeckyEQ", plugin_name="DeckyEQ", package_name="deckyeq",
+                current=os.environ.get("DECKY_PLUGIN_VERSION") or VERSION, home=home, logger=decky.logger,
+                required=(*dk_update.REQUIRED, "bin/deckyeq_dsp.so"), flags=[], uploader="github-actions[bot]")
             if previous:
                 await previous.close()  # Started again on this instance: the old filter and monitor go first.
             self._previous = None
@@ -50,11 +65,11 @@ class Plugin:
                 await runtime.recover()
             except Exception:
                 decky.logger.exception("DeckyEQ audio recovery failed")
-            files = PresetFiles(environment().get("HOME") or str(Path.home()))
+            files = PresetFiles(home)
             if getattr(self, "_unloading", False):
                 self._startup_error = "DeckyEQ is unloading."  # RPCs say so instead of failing on no service.
                 return  # Decky unloaded us during recovery: start no audio.
-            self._service = Service(Store(settings), runtime, files)
+            self._service = Service(Store(settings), runtime, files, decky.logger)
             await self._service.start()
             if getattr(self, "_unloading", False):
                 await self._service.close()  # Decky unloaded us while we were starting.
@@ -62,55 +77,57 @@ class Plugin:
             decky.logger.info("DeckyEQ %s loaded pid=%s uid=%s audio=%s", VERSION, os.getpid(),
                               getattr(os, "getuid", lambda: -1)(), self._service.phase)
         except Exception as exc:
-            self._startup_error = str(exc)
+            # Shown in the panel: DeckyEQ's own messages name no path; any other error (an OSError holds one) its type.
+            known = isinstance(exc, (EQError, RuntimeError))
+            self._startup_error = str(exc) if known else f"DeckyEQ could not start ({type(exc).__name__}). Details are in the Decky log."
             decky.logger.exception("DeckyEQ startup failed")
         finally:
             self._ready.set()
 
     async def _wait(self):
+        """(service, None) once started, else (None, refusal); a refusal with `starting` asks to try again soon."""
         # Decky can receive a frontend RPC before scheduling _main.
         for _ in range(100):
             if hasattr(self, "_ready"):
                 try:
                     await asyncio.wait_for(self._ready.wait(), 30)
                 except asyncio.TimeoutError:
-                    raise RuntimeError("DeckyEQ is still starting. Try again.") from None
+                    break
                 if self._startup_error:
-                    raise RuntimeError(self._startup_error)
+                    return None, dk_rpc.fail(self._startup_error)
                 if self._service is None:  # A second _main began meanwhile and is starting a new one.
                     break
-                return self._service
+                return self._service, None
             await asyncio.sleep(0.05)
-        raise RuntimeError("DeckyEQ is still starting. Try again.")
+        return None, dk_rpc.fail(STARTING, starting=True)
 
+    @rpc
     async def get_status(self):
-        service = await self._wait()
-        return await service.status()
+        service, refusal = await self._wait()
+        return refusal or dk_rpc.ok(await service.status())
 
+    @rpc
     async def perform(self, action, payload, revision):
-        service = await self._wait()
-        return await service.action(action, payload, revision)
+        service, refusal = await self._wait()
+        return refusal or await service.action(action, payload, revision)
 
+    @rpc
     async def set_game(self, appid, name):
-        try:
-            service = await self._wait()
-        except RuntimeError as exc:
-            if not self._startup_error:
-                raise  # Still starting: the panel tries again on its next tick.
-            return {"ok": False, "error": str(exc)}  # Failed for good: the panel backs off.
-        return await service.set_game(appid, name)
+        service, refusal = await self._wait()
+        return refusal or await service.set_game(appid, name)
 
+    @rpc
     async def updates_check(self):
         updates = getattr(self, "_updates", None)
         if updates is None:
-            return {"success": False, "current_version": "", "update_available": False,
-                    "download_available": False, "error": "DeckyEQ is still starting. Try again."}
-        return await asyncio.to_thread(updates.check)
+            return dk_rpc.fail(STARTING, current_version="", update_available=False, download_available=False)
+        return await asyncio.to_thread(updates.check, True)  # The panel checks only when asked to.
 
+    @rpc
     async def updates_download(self, expected_version):
         updates = getattr(self, "_updates", None)
         if updates is None:
-            return {"success": False, "error": "DeckyEQ is still starting. Try again."}
+            return dk_rpc.fail(STARTING)
         return await asyncio.to_thread(updates.download, expected_version)
 
     async def _unload(self):
@@ -123,4 +140,5 @@ class Plugin:
                 service.abandon()  # Never await here: Decky 3.3 starves the loop once it closed our socket.
 
     async def _uninstall(self):
+        # Decky runs this on every update too: end the audio like _unload; settings and presets stay.
         await self._unload()

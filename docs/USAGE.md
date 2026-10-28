@@ -283,8 +283,8 @@ within 10 seconds of starting shows **The equalizer stopped: …** and is retrie
 After a failure, retries wait 8, 16, 32 and then 60 seconds, and a filter that keeps
 failing keeps that backoff until it has run for a minute. This is a software polling
 guard, not an instantaneous hardware interlock; there can be a short transition
-before bypass. `pactl subscribe` and the filter both run through `worker.py`, so they
-end with the plugin even if Decky is killed.
+before bypass. `pactl subscribe` and the filter both start through `dk_process`'s
+parent-death wrapper, so they end with the plugin even if Decky is killed.
 
 Steam's output choice is never overridden, with one exception: if Steam plays to the
 **DeckyEQ** node itself, stopping or unloading hands Steam's output back to the selected
@@ -327,11 +327,15 @@ npm ci
 npm run check
 ```
 
-Individual commands: `npm run typecheck`, `npm test`, `npm run test:ui`,
-`npm run build`, `npm run package`. The package builder verifies metadata,
-required runtime files, ZIP integrity and absence of preview code. It produces
-a deterministic ZIP and a SHA-256 sidecar in `artifacts/`; `npm run package`
-always rebuilds `dist/` first so the bundle matches the sources it ships with.
+Individual commands: `npm run typecheck`, `npm test` (backend; on Windows also in
+WSL), `npm run test:frontend`, `npm run build`, `npm run package`. The build checks
+the bundle (`scripts/check-build.mjs`: nothing imported, only shipped sources such
+as `src/` in it, so the browser preview never is). The package builder
+(`scripts/package.mjs`, shared with the author's other plugins through DeckyKit)
+builds the native stage, verifies versions, the CHANGELOG, flags, the files listed
+in `package.json` → `decky.files` and that git tracks every file in a listed folder,
+then writes a deterministic ZIP and its SHA-256 sidecar to `artifacts/` and reads
+the ZIP back byte for byte. It refuses a `dist/` older than `src/`.
 
 Shared limits (band frequencies, value ranges, the boost cap) live in
 `deckyeq/limits.json` and are read by both the backend and the panel.
@@ -343,7 +347,8 @@ the tests' types too.
 
 ### Releases
 
-Pushing a tag `vX.Y.Z` that matches `plugin.json` runs `.github/workflows/release.yml`:
+Pushing a tag `X.Y.Z` (no `v`) that matches `plugin.json` and CHANGELOG's top section
+runs `.github/workflows/release.yml`:
 the build job installs dependencies without their install scripts, runs the full
 check without write access, and the publish job attests the ZIP's build
 provenance and creates a **draft** release. Publish the draft by hand after the
@@ -360,16 +365,19 @@ See [VALIDATION.md](VALIDATION.md) for the local evidence and remaining acceptan
 ## Architecture and future integration
 
 - `deckyeq/model.py`: preset schema, bounds, serialization and library operations.
-- `deckyeq/storage.py`: atomic storage and bounded file exchange.
+- `deckyeq/storage.py`: settings on `dk_fs` (atomic, last-good copy) and bounded file exchange.
 - `deckyeq/graph.py`: one fixed native PipeWire graph and named live controls.
 - `deckyeq/runtime.py`: smart filter process ownership and verified control writes.
 - `deckyeq/service.py`: serialized transactions, rollback, monitoring and RPC state.
 - `main.py`: minimal Decky entry point with unprivileged lifecycle ownership.
 - `src/controller.ts`: one frontend write queue retained across QAM remounts.
-- `src/App.tsx`: native Decky controls, preset management and the full-screen editor dialog.
+- `src/App.tsx`: the panel's pages, preset management and the full-screen editor dialog.
+- `src/shared.tsx`: styles, icons, rows and dialogs the pages share.
 - `src/editor.tsx`: the curve graph (touch and controller editing).
 - `src/pairs.ts`: five-slider pairs and the per-device five-slider preference.
-- `deckyeq/updates.py` and `src/updates.tsx`: verified release downloads and About UI.
+- `dk_update.py` and `src/updates.tsx`: verified release downloads and About UI.
+- `dk_*.py`: modules shared with the author's other Decky plugins (files, processes, network,
+  RPC answers, updates); they are copied from DeckyKit, not edited here.
 
 The core engine has no dependency on the Decky frontend, so a future Companion
 integration can reuse it. Both implementations must not run simultaneously with

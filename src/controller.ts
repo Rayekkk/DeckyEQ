@@ -37,7 +37,8 @@ export class Controller {
   reportError = (error: unknown) => this.publish({ error: text(error) });
 
   refresh = async (): Promise<void> => {
-    if (this.disposed || this.view.busy || this.desired || this.drain || this.reading) return;
+    if (this.disposed || this.view.busy || this.desired || this.drain) return;
+    if (this.reading) return this.reading;  // Its answer, not an older snapshot (index.tsx checks the game after it).
     const epoch = this.epoch;
     const request = (async () => {
       try {

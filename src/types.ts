@@ -32,7 +32,10 @@ export interface Snapshot {
   };
   warning: string | null; home: string; export_directory: string;
 }
-export interface Result { ok: boolean; state?: Snapshot; error?: string; message?: string | null; path?: string }
+/** Every RPC's answer (DeckyKit D2). `starting`: refused only because the backend is still starting. */
+export interface Result {
+  ok: boolean; state?: Snapshot; error?: string; message?: string | null; path?: string; starting?: boolean;
+}
 export interface Transport {
   status(): Promise<Snapshot>;
   perform(action: string, payload: Record<string, unknown>, revision: number): Promise<Result>;

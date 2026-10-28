@@ -6,22 +6,24 @@ import { useSyncExternalStore } from "react";
 import { version } from "../package.json";
 import { fromHome } from "./controller";
 
+/** dk_update's answers (DeckyKit D2). */
 export interface UpdateCheck {
-  success: boolean;
+  ok: boolean;
   current_version: string;
   latest_version?: string;
   update_available: boolean;
   download_available: boolean;
-  release_url?: string;
   asset_name?: string;
   size?: number;
   checked_at?: number;
   no_release?: boolean;
+  /** Why a newer release cannot be downloaded yet (e.g. no verified ZIP), or that none is published. */
+  message?: string;
   error?: string;
 }
 
 export interface UpdateDownload {
-  success: boolean;
+  ok: boolean;
   path?: string;
   version?: string;
   sha256?: string;
@@ -66,13 +68,13 @@ export class UpdateController {
     try {
       if (kind === "check") {
         const result = await this.client.check();
-        if (!result.success) throw new Error(result.error || "Could not check GitHub releases. Try again.");
+        if (!result.ok) throw new Error(result.error || "Could not check GitHub releases. Try again.");
         // A successful check may carry a note (e.g. no ZIP yet); statusText shows it, not the error alert.
         this.publish({ ...this.state, check: result, error: undefined,
           download: this.state.download?.version === result.latest_version ? this.state.download : undefined });
       } else {
         const result = await this.client.download(expected!);
-        if (!result.success || !result.path || result.version !== expected) {
+        if (!result.ok || !result.path || result.version !== expected) {
           throw new Error(result.error || "Could not confirm the downloaded ZIP. Try again.");
         }
         this.publish({ ...this.state, download: result });
@@ -92,7 +94,7 @@ function statusText(check?: UpdateCheck, failed = false): [string, string] {
   if (!check) return [failed ? "Check failed" : "Not checked yet", `Installed version: ${installed}.`];
   if (check.no_release) return ["No public release yet", `Installed version: ${installed}.`];
   if (check.update_available) {
-    if (!check.download_available) return ["New release found", `Version ${check.latest_version}: ${check.error?.replace(/\.$/, "") || "no verified installation ZIP yet"}. Check again later.`];
+    if (!check.download_available) return ["New release found", `Version ${check.latest_version}: ${check.message?.replace(/\.$/, "") || "no verified installation ZIP yet"}. Check again later.`];
     const size = check.size ? ` (${(check.size / 1048576).toFixed(1)} MB)` : "";
     return ["Update available", `Version ${check.latest_version}${size}.`];
   }

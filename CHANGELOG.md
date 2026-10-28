@@ -2,6 +2,23 @@
 
 All notable changes to DeckyEQ, newest first.
 
+## [Unreleased]
+
+### Changed
+
+- **Decky log.** DeckyEQ now writes what it does to Decky's log: turning EQ on or off,
+  preset and output changes, a game's own sound, and why audio paused or a change was refused.
+  Slider moves and the regular audio check are not logged, and nothing names your files.
+- **Updates.** A Downloads folder that is a link (for example to a microSD card) now works,
+  and no half-finished file sits in Downloads while an update downloads.
+
+### Fixed
+
+- **Damaged settings.** If the settings file is ever damaged, DeckyEQ restores your most
+  recent settings instead of the ones before them, and keeps the damaged file beside it.
+- **Error messages.** An unexpected error shows a short message instead of details that
+  could include folder names; the details go to Decky's log.
+
 ## [1.1.0] - 2026-10-24
 
 This update rebuilds the panel around a curve you can edit by touch or controller, adds

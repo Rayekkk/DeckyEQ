@@ -21,13 +21,14 @@ ERROR_PAUSE_SECONDS = 2  # After an unexpected monitor error, so a repeating fai
 TOOL_RETRIES = 3  # Heartbeat tool hiccups (e.g. pw-dump timing out while a game loads) tolerated in a row.
 STABLE_SECONDS = 60  # Failures are forgotten only after the filter has run this long without one.
 CRASH_SECONDS = 10  # A filter that ends sooner after its start is crashing; later (e.g. PipeWire restarted) it is rebuilt.
-log = logging.getLogger(__name__)
-
-
 class Service:
-    def __init__(self, store, runtime, files):
+    def __init__(self, store, runtime, files, log=None):
         self.store, self.runtime, self.files = store, runtime, files
+        self.log = log or logging.getLogger(__name__)  # main.py gives Decky's logger.
         self.data = store.load()
+        if store.warning:
+            self.log.warning(store.warning)
+        self.reported = None  # The (phase, error) last logged: the log hears changes, not heartbeats.
         self.revision = 0
         self.phase = "off"
         self.message = "EQ is off, so changes are not heard."
@@ -59,7 +60,7 @@ class Service:
                 switch_scope(updated, "")
                 self.data = updated
                 try:
-                    self.store.save(updated, backup=True)
+                    self.store.save(updated)
                 except (EQError, OSError):
                     pass  # The next save writes it; the sound playing is right either way.
             if self.runtime.supported:
@@ -74,8 +75,19 @@ class Service:
                     self._failed(exc)
             else:
                 self.phase, self.message = "unavailable", self.runtime.reason
+            self._report()
             if not self.closed:
                 self.monitor = asyncio.create_task(self._watch())
+
+    def _report(self):
+        """Log the audio state when it changes (never per heartbeat), without paths or the user's names."""
+        seen = (self.phase, self.error)
+        if seen != self.reported:
+            self.reported = seen
+            if self.error:
+                self.log.warning("Audio %s: %s (%s)", self.phase, self.message, self.error)
+            else:
+                self.log.info("Audio %s: %s", self.phase, self.message)
 
     def _failed(self, exc):
         self.error = str(exc)
@@ -131,6 +143,8 @@ class Service:
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # Unexpected tool output must pause audio, never end monitoring.
+                if not isinstance(exc, EQError) and str(exc) != self.error:  # A bug: its traceback, once.
+                    self.log.exception("The DeckyEQ audio monitor failed")
                 if isinstance(exc, ToolError) and (self.tool_errors < TOOL_RETRIES or not self.data["enabled"]
                                                    or not self.answered):
                     # A tool that did not answer says nothing about the sound, which is still the last
@@ -149,6 +163,8 @@ class Service:
                         pass  # Without the filter, playback continues on the output directly.
                     self._failed(exc)
                 await asyncio.sleep(ERROR_PAUSE_SECONDS)
+            finally:
+                self._report()
 
     async def _rebuild(self, data):
         """PipeWire restarted under the filter (its node is gone): build it again, no error."""
@@ -163,7 +179,7 @@ class Service:
         try:
             await self.runtime.recover()
         except (EQError, OSError):
-            pass
+            pass  # recover() keeps what it could not settle and tries on the next event; main.py logs the first try.
 
     async def _sync(self, data, max_age=0.0):
         """Bring the filter in line with data. It never changes outputs, streams or volumes."""
@@ -192,7 +208,7 @@ class Service:
                 and time.monotonic() - runtime.started_at < CRASH_SECONDS):
             # The filter ended on its own soon after it started. Starting it again on every event would cut the
             # sound in a loop under "EQ on": pause like any failure instead, and let the backoff retry.
-            log.warning("The DeckyEQ filter exited with %s: %s", runtime.process.returncode, runtime.log[-1024:])
+            self.log.warning("The DeckyEQ filter exited with %s: %s", runtime.process.returncode, runtime.log[-1024:])
             reason = runtime.log.strip()[-240:] or f"exit code {runtime.process.returncode}"
             await runtime.stop()
             self._failed(EQError("The equalizer stopped: " + reason))
@@ -256,7 +272,9 @@ class Service:
                 game = {"appid": appid, "name": f"App {appid}"}
         if self.closed:
             return {"ok": False, "error": "DeckyEQ is unloading."}
-        return await self._shielded(self._set_game(game))
+        result = await self._shielded(self._set_game(game))
+        self._report()
+        return result
 
     async def _set_game(self, game):
         async with self.lock:
@@ -273,9 +291,13 @@ class Service:
                     # still plays stays shown with it until the panel's retry gets the switch through.
                     if not self.data["scope"]:
                         self.game = game
+                    if self.game_error != str(exc):  # The panel retries every 30 s: log the reason once.
+                        self.log.warning("Could not switch to the sound for game %s: %s", scope or "none", exc)
                     self.game_error = str(exc)
                     return {"ok": False, "error": str(exc), "state": self.snapshot()}
                 self.switched = self.revision
+                self.log.info("Game %s: %s", (game or {}).get("appid", "none"),
+                              "its own sound" if scope else "the everyday sound")
             self.game, self.game_error = game, None  # Only now: a poll mid-switch must not show the new game with the old sound.
             return {"ok": True, "state": self.snapshot()}
 
@@ -287,7 +309,14 @@ class Service:
     async def action(self, action, payload, revision):
         if self.closed:
             return {"ok": False, "error": "DeckyEQ is unloading."}
-        return await self._shielded(self._action(action, payload, revision))
+        result = await self._shielded(self._action(action, payload, revision))
+        name = str(action)[:32]
+        if not result["ok"]:
+            self.log.warning("Action %s refused: %s", name, result["error"])
+        elif action != "edit":  # Slider edits come many times a second: only their refusals are logged.
+            self.log.info("Action %s done", name)
+        self._report()
+        return result
 
     @staticmethod
     async def _shielded(transaction):
@@ -328,7 +357,7 @@ class Service:
                         try:
                             await self.runtime.stop()  # Like the monitor: no half-applied filter stays.
                         except Exception:
-                            pass
+                            pass  # Without the filter, playback continues on the output directly.
                         self._failed(exc)
                         raise EQError(str(exc)) from None
                     return {"ok": True, "state": self.snapshot()}
@@ -344,7 +373,12 @@ class Service:
                 await self._commit(validate_state(updated), backup=action != "edit")
                 return {"ok": True, "state": self.snapshot(), "message": note}
             except Exception as exc:  # Reported to the panel, never a raw exception to Decky.
-                return {"ok": False, "error": str(exc) or type(exc).__name__, "state": self.snapshot()}
+                if isinstance(exc, EQError):
+                    error = str(exc) or type(exc).__name__
+                else:  # A bug: the traceback goes to the log; str(exc) may name a path, so the panel gets none.
+                    self.log.exception("DeckyEQ action %s failed", str(action)[:32])
+                    error = f"Unexpected error ({type(exc).__name__}). Details are in the Decky log."
+                return {"ok": False, "error": error, "state": self.snapshot()}
 
     async def _commit(self, updated, backup):
         """Apply a validated state to audio, then to disk; any failure restores the previous sound.
@@ -367,7 +401,7 @@ class Service:
             elif audio and not kept:
                 await self._sync(updated)
             if backup:
-                self.store.save(updated, backup=True)
+                self.store.save(updated)
                 if self.store.warning and self.store.warning.startswith(DRAFT_WARNING):
                     self.store.warning = None
         except Exception as exc:
@@ -382,7 +416,7 @@ class Service:
                 try:
                     await self.runtime.stop()
                 except Exception:
-                    pass
+                    pass  # Without the filter, playback continues on the output directly.
                 self._failed(EQError(f"{exc} Rollback: {rollback}"))
             raise EQError(str(exc)) from None
         self.data, self.revision = updated, self.revision + 1
@@ -404,8 +438,10 @@ class Service:
     def _save_draft(self):
         self.draft_task = None
         try:
-            self.store.save(self.data, backup=False)
+            self.store.save(self.data)
         except (EQError, OSError) as exc:
+            if self.store.warning != DRAFT_WARNING + str(exc):  # Each later slider edit tries again: log once.
+                self.log.warning(DRAFT_WARNING + str(exc))
             self.store.warning = DRAFT_WARNING + str(exc)
             return  # Still dirty: the next edit or close() tries again.
         self.draft_dirty = False

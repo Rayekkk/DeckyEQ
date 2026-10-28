@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from deckyeq.graph import SINK_NAME
 from deckyeq.model import EQError, NodeGone, OutputGone, ToolError, create_preset, flat_eq, export_document, initial_state, selected_preset
@@ -277,7 +277,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         # Toasts can be seen on a stream: not "[Errno 28] No space left on device: '/home/deck/...'".
         error = OSError(28, "No space left on device", str(self.home / "settings" / ".settings.json"))
         await self.act("edit", eq=flat_eq() | {"bass": 2.0})
-        with patch("deckyeq.storage.atomic_json", side_effect=error):
+        with patch("dk_fs.write_atomic", side_effect=error):
             result = await self.act("select", id="go-s-original")
             self.service._save_draft()
         self.assertEqual(result["error"], "Settings could not be saved. Check free space.")
@@ -313,7 +313,6 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             save.assert_not_called()  # Saved after the drag settles, not on every step.
             await asyncio.wait_for(self.service.draft_task, 3)
         self.assertEqual(self.runtime.eq["bass"], 2)
-        self.assertFalse(save.call_args.kwargs["backup"])
         self.assertEqual(self.store.load()["working"]["bass"], 2)
 
     async def test_volume_boost_is_a_live_global_setting(self):
@@ -434,6 +433,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.run_monitor(until=lambda: len(self.waits) > 3, change=lambda: next(events, False))
         self.assertTrue(all(wait > 5 for wait in self.waits), self.waits)
 
+    async def test_the_log_hears_actions_and_audio_changes_not_heartbeats_or_slider_steps(self):
+        with self.assertLogs("deckyeq.service", "INFO") as logs:
+            await self.act("enable", enabled=True)
+            for bass in (1, 2, 3):
+                await self.act("edit", eq=flat_eq() | {"bass": float(bass)})
+            await self.run_monitor(until=lambda: len(self.waits) > 5)  # Heartbeats only: nothing changes.
+            await self.service.action("edit", {"eq": flat_eq()}, 10 ** 6)  # A wrong revision: refused.
+        lines = [line.split(":", 2)[2] for line in logs.output]
+        self.assertEqual(lines[0], "Action enable done")
+        self.assertTrue(lines[1].startswith("Audio active: EQ on "), lines)
+        self.assertEqual(lines[2:], ["Action edit refused: Settings changed meanwhile. Check them and try again."])
+        self.assertFalse([line for line in logs.output if str(self.home) in line])
+
+    async def test_an_unexpected_error_is_logged_and_the_panel_gets_no_detail(self):
+        boom = RuntimeError(f"could not open {self.home}/secret")
+        with patch.dict("deckyeq.service.HANDLERS", reset=Mock(side_effect=boom)), self.assertLogs("deckyeq.service", "ERROR") as logs:
+            result = await self.act("reset")
+        self.assertEqual(result["error"], "Unexpected error (RuntimeError). Details are in the Decky log.")
+        self.assertIn("state", result)
+        self.assertIn("Traceback", logs.output[0])
+        self.assertEqual((await self.act("reset"))["ok"], True, "nothing is left half-done")
+
     async def test_a_filter_that_keeps_ending_is_paused_not_restarted_on_every_event(self):
         await self.act("enable", enabled=True)
         self.runtime.process.returncode, self.runtime.log = 1, "spa.audioconvert: assertion failed\n"
@@ -455,7 +476,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_slider_edits_while_connecting_are_kept_and_applied_once_audio_answers(self):
         store, runtime = Store(self.home / "boot"), FakeRuntime()
-        store.save({**initial_state(), "enabled": True, "target": "alsa_output.speakers"}, backup=True)
+        store.save({**initial_state(), "enabled": True, "target": "alsa_output.speakers"})
         service = Service(store, runtime, PresetFiles(self.home))
         self.addAsyncCleanup(service.close)
         eq = flat_eq()
@@ -475,7 +496,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_audio_that_answers_only_after_a_long_boot_is_connecting_not_paused(self):
         # EQ on at boot; the user's audio session needs well over TOOL_RETRIES tries to answer.
         store, self.runtime = Store(self.home / "boot"), FakeRuntime()
-        store.save({**initial_state(), "enabled": True, "target": "alsa_output.speakers"}, backup=True)
+        store.save({**initial_state(), "enabled": True, "target": "alsa_output.speakers"})
         self.service = Service(store, self.runtime, PresetFiles(self.home))
         self.addAsyncCleanup(self.service.close)
         real_scan, scans = self.runtime.scan, []
@@ -619,7 +640,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_audio_that_answers_late_at_boot_says_connecting_and_is_retried(self):
         store, runtime = Store(self.home / "boot"), FakeRuntime()
-        store.save({**initial_state(), "enabled": True, "target": "alsa_output.speakers"}, backup=True)
+        store.save({**initial_state(), "enabled": True, "target": "alsa_output.speakers"})
         service = Service(store, runtime, PresetFiles(self.home))
         self.addAsyncCleanup(service.close)
         real_scan, scans = runtime.scan, []

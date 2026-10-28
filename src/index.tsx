@@ -1,6 +1,7 @@
 import { callable, definePlugin, FileSelectionType, openFilePicker, toaster, useQuickAccessVisible } from "@decky/api";
 import { Router, staticClasses } from "@decky/ui";
-import { App, EqualizerIcon, FileUI } from "./App";
+import { App } from "./App";
+import { EqualizerIcon, FileUI } from "./shared";
 import { Controller } from "./controller";
 import { Result, Snapshot } from "./types";
 import { UpdateCheck, UpdateController, UpdateDownload } from "./updates";
@@ -11,9 +12,14 @@ const within = <T,>(seconds: number, request: Promise<T>) => new Promise<T>((res
   const timer = setTimeout(() => reject(new Error("DeckyEQ did not answer in time.")), seconds * 1000);
   request.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
 });
-const getStatus = callable<[], Snapshot>("get_status");
+const getStatus = callable<[], Result>("get_status");
 const performAction = callable<[string, Record<string, unknown>, number], Result>("perform");
-const status = () => within(35, getStatus());  // The backend itself waits up to 30 s for its start.
+// The backend itself waits up to 30 s for its start. A refusal (still starting, failed to start) is shown like a
+// lost connection: the panel says why and polls again.
+const status = () => within(35, getStatus()).then((result): Snapshot => {
+  if (!result.ok || !result.state) throw new Error(result.error || "DeckyEQ sent no settings.");
+  return result.state;
+});
 const perform = (action: string, payload: Record<string, unknown>, revision: number) =>
   within(45, performAction(action, payload, revision));  // Long enough for a filter rebuild.
 const setGame = callable<[string, string], Result>("set_game");
@@ -62,6 +68,7 @@ export default definePlugin(() => {
       if (sent !== request) return;
       sending = false;
       if (closed) return;
+      if (!result.ok && result.starting) { reported = null; return; }  // Not up yet: try again on the next tick.
       const first = refused !== appid;
       if (!result.ok) { reported = null; refused = appid; retryAt = Date.now() + GAME_RETRY_MS; }  // Retry every 30 s, not every tick.
       else refused = null;
