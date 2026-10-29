@@ -225,7 +225,7 @@ it("retries quietly when the backend failed to start: the panel says why, no toa
   await tick(34000);
   expect(decky.setGame.mock.calls.map(call => call[0])).toEqual(["", "7", "1145360", "1145360"]);  // Retried every 30 s.
   expect(toaster.toast).not.toHaveBeenCalled();
-  expect(screen.getByText("Could not load DeckyEQ")).toBeTruthy();
+  expect(screen.getByText("DeckyEQ unavailable")).toBeTruthy();
   expect(screen.getByText(new RegExp(failed.replace(/\./g, "\\.")))).toBeTruthy();
 });
 
@@ -233,10 +233,10 @@ it("waits for a slow backend start before it gives up on the first status", asyn
   decky.status.mockImplementation(() => new Promise(() => {}));  // The backend waits up to 30 s for its own start.
   await setup(true);
   await tick(34000);
-  expect(screen.getByText("Loading DeckyEQ…")).toBeTruthy();
+  expect(screen.getByRole("progressbar", { name: "Loading" })).toBeTruthy();
   expect(screen.queryByText(/plugin backend/)).toBeNull();
   await tick(2000);
-  expect(screen.getByText("Could not load DeckyEQ")).toBeTruthy();
+  expect(screen.getByText("DeckyEQ unavailable")).toBeTruthy();
 });
 
 it("ignores a late answer for a game the user already left", async () => {
@@ -307,11 +307,10 @@ it("keeps updates in About and retains a requested result while QAM is hidden", 
   expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "‹ DeckyEQ" }));
   open("About");
-  expect(screen.getByText(/BSD 3-Clause/)).toBeTruthy();
+  expect(screen.getByText(/BSD-3-Clause/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Check for updates" }).compareDocumentPosition(screen.getByText(/^Version \d+\.\d+\.\d+$/)))
-    .toBe(Node.DOCUMENT_POSITION_FOLLOWING);  // The page's one action comes before the facts.
-  expect(screen.queryByText(/A live equalizer/)).toBeNull();
-  expect(screen.getByText(/no extra audio packages\.$/)).toBeTruthy();
+    .toBe(Node.DOCUMENT_POSITION_PRECEDING);  // UI.md §3: the plugin's info first, Updates at the very bottom.
+  expect(screen.getByText(/No extra audio packages\.$/)).toBeTruthy();
   let resolve!: (value: unknown) => void;
   decky.checkUpdates.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
   fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));

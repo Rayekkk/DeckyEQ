@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import dk_fs
+
 from deckyeq.graph import SINK_NAME
 from deckyeq.model import EQError, NodeGone, OutputGone, ToolError, create_preset, flat_eq, export_document, initial_state, selected_preset
 from deckyeq.runtime import private
@@ -297,6 +299,13 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("deckyeq.conf", json.dumps(self.service.snapshot()["audio"]))
             self.assertIn("deckyeq.conf", "\n".join(logs.output))
         self.assertEqual(self.service.error, "Permission denied")
+
+    async def test_an_unsafe_path_shows_its_own_text(self):
+        # dk_fs.UnsafePath names the file, never the folders above it: clearer than its type's name.
+        with patch.object(self.runtime, "start", side_effect=dk_fs.UnsafePath("deckyeq.conf is a symbolic link")), \
+                self.assertLogs("deckyeq.service", "ERROR"):
+            result = await self.act("enable", enabled=True)
+        self.assertEqual(result["error"], "deckyeq.conf is a symbolic link")
 
     async def test_headphone_port_bypasses_then_speakers_resume(self):
         await self.act("enable", enabled=True)

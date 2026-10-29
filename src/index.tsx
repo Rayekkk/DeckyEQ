@@ -1,10 +1,11 @@
-import { callable, definePlugin, FileSelectionType, openFilePicker, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, definePlugin, FileSelectionType, openFilePicker, useQuickAccessVisible } from "@decky/api";
 import { Router, staticClasses } from "@decky/ui";
 import { App } from "./App";
 import { EqualizerIcon, FileUI } from "./shared";
 import { Controller } from "./controller";
 import { Result, Snapshot } from "./types";
-import { UpdateCheck, UpdateController, UpdateDownload } from "./updates";
+import { UpdateCheck, UpdateController, UpdateDownload } from "./about";
+import { notify } from "./ui";
 
 // A backend that never answers must not lock the panel: the controller treats a timeout like a
 // lost connection, reports the change as not confirmed and polls again.
@@ -34,11 +35,11 @@ const files: FileUI = {
   exportFolder: home => picked(openFilePicker(FileSelectionType.FOLDER, home, false, true)),
 };
 
-const toast = (body: string) => toaster.toast({ title: "DeckyEQ", body });
+const toast = (body: string) => notify("DeckyEQ", body);
 
 export default definePlugin(() => {
   const controller = new Controller({ status, perform });
-  const updates = new UpdateController({ check: checkUpdates, download: downloadUpdate });
+  const updates = new UpdateController({ check: checkUpdates, download: downloadUpdate }, "deckyeq");
   // Runs while the QAM is closed too: a game with its own sound gets it within two seconds of starting.
   // null: not reported yet, so the first tick also reports "no game" (a reboot may have left one active).
   // A change of game (or none) counts only once two reads in a row agree: launchers and restarts blip.

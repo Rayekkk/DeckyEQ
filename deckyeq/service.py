@@ -8,6 +8,8 @@ import logging
 import time
 from pathlib import Path
 
+import dk_fs
+
 from .graph import SINK_NAME, headroom
 from .model import (APPID, EQError, FACTORY_IDS, LIMITS, MAX_GAMES, MAX_PRESETS, NodeGone, OutputGone, ToolError, create_preset,
                     decode_import, export_document, flat_eq, game_name, name, number, presets, selected_preset,
@@ -22,11 +24,6 @@ ERROR_PAUSE_SECONDS = 2  # After an unexpected monitor error, so a repeating fai
 TOOL_RETRIES = 3  # Heartbeat tool hiccups (e.g. pw-dump timing out while a game loads) tolerated in a row.
 STABLE_SECONDS = 60  # Failures are forgotten only after the filter has run this long without one.
 CRASH_SECONDS = 10  # A filter that ends sooner after its start is crashing; later (e.g. PipeWire restarted) it is rebuilt.
-
-
-def shown(exc):
-    """A failure's text for the panel. An OSError's names a path (with the user's name): only its description."""
-    return (exc.strerror or type(exc).__name__) if isinstance(exc, OSError) else str(exc)
 
 
 class Service:
@@ -98,7 +95,7 @@ class Service:
                 self.log.info("Audio %s: %s", self.phase, self.message)
 
     def _failed(self, exc):
-        self.error = shown(exc)
+        self.error = dk_fs.shown(exc)
         self.phase, self.message = "error", "Audio changes are paused. Check your output, then use Reconnect EQ."
         self.failures += 1
         self.failed_at = time.monotonic()
@@ -151,7 +148,7 @@ class Service:
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # Unexpected tool output must pause audio, never end monitoring.
-                if not isinstance(exc, EQError) and shown(exc) != self.error:  # A bug or OSError: its details, once.
+                if not isinstance(exc, EQError) and dk_fs.shown(exc) != self.error:  # A bug or OSError: its details, once.
                     self.log.exception("The DeckyEQ audio monitor failed")
                 if isinstance(exc, ToolError) and (self.tool_errors < TOOL_RETRIES or not self.data["enabled"]
                                                    or not self.answered):
@@ -299,10 +296,10 @@ class Service:
                     # still plays stays shown with it until the panel's retry gets the switch through.
                     if not self.data["scope"]:
                         self.game = game
-                    if self.game_error != shown(exc):  # The panel retries every 30 s: log the reason once.
+                    if self.game_error != dk_fs.shown(exc):  # The panel retries every 30 s: log the reason once.
                         self.log.warning("Could not switch to the sound for game %s: %s", scope or "none", exc)
-                    self.game_error = shown(exc)
-                    return {"ok": False, "error": shown(exc), "state": self.snapshot()}
+                    self.game_error = dk_fs.shown(exc)
+                    return {"ok": False, "error": dk_fs.shown(exc), "state": self.snapshot()}
                 self.switched = self.revision
                 self.log.info("Game %s: %s", (game or {}).get("appid", "none"),
                               "its own sound" if scope else "the everyday sound")
@@ -369,7 +366,7 @@ class Service:
                         except Exception:
                             pass  # Without the filter, playback continues on the output directly.
                         self._failed(exc)
-                        raise EQError(shown(exc)) from None
+                        raise EQError(dk_fs.shown(exc)) from None
                     return {"ok": True, "state": self.snapshot()}
                 if action == "export":
                     path = await self._export(payload)
@@ -431,8 +428,8 @@ class Service:
                     await self.runtime.stop()
                 except Exception:
                     pass  # Without the filter, playback continues on the output directly.
-                self._failed(EQError(f"{shown(exc)} Rollback: {shown(rollback)}"))
-            raise EQError(shown(exc)) from None
+                self._failed(EQError(f"{dk_fs.shown(exc)} Rollback: {dk_fs.shown(rollback)}"))
+            raise EQError(dk_fs.shown(exc)) from None
         self.data, self.revision = updated, self.revision + 1
         self._cancel_draft()
         self.draft_dirty = not backup
@@ -454,9 +451,9 @@ class Service:
         try:
             self.store.save(self.data)
         except (EQError, OSError) as exc:
-            if self.store.warning != DRAFT_WARNING + shown(exc):  # Each later slider edit tries again: log once.
+            if self.store.warning != DRAFT_WARNING + dk_fs.shown(exc):  # Each later slider edit tries again: log once.
                 self.log.warning(DRAFT_WARNING + str(exc))
-            self.store.warning = DRAFT_WARNING + shown(exc)
+            self.store.warning = DRAFT_WARNING + dk_fs.shown(exc)
             return  # Still dirty: the next edit or close() tries again.
         self.draft_dirty = False
         if self.store.warning and self.store.warning.startswith(DRAFT_WARNING):

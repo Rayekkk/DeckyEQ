@@ -41,6 +41,7 @@ export function DropdownItem({ label, description, selectedOption, rgOptions, on
   </select></label>;
 }
 export const TextField = ({ label, value, onChange, disabled, focusOnMount }: any) => <label className="preview-text">{label}<input aria-label={label} value={value} onChange={onChange} disabled={disabled} autoFocus={focusOnMount} /></label>;
+export const Spinner = () => <div className="preview-spinner" role="progressbar" aria-label="Loading" />;
 export const ButtonItem = ({ children, onClick, disabled }: any) => <button className="preview-button" onClick={onClick} disabled={disabled}>{children}</button>;
 // Keys stand in for the gamepad: Enter A, Escape B, arrows the D-pad, z/c LT/RT, x X, y Y.
 const pad: Record<string, GamepadButton> = { Enter: GamepadButton.OK, Escape: GamepadButton.CANCEL, ArrowUp: GamepadButton.DIR_UP,

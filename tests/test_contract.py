@@ -61,7 +61,7 @@ class ActionTests(unittest.TestCase):
     def test_the_frontend_sends_the_backends_action_names(self):
         from deckyeq.service import HANDLERS
         code = "\n".join(path.read_text(encoding="utf-8") for path in (FIXTURE.parent.parent.parent / "src").glob("*.ts*")
-                         if path.name != "updates.tsx")  # Its controller.run("check" | "download") is not a backend action.
+                         if path.name != "about.tsx")  # Its controller.run("check" | "download") is not a backend action.
         direct = {"refresh", "export"}  # Handled in Service._action itself, not through HANDLERS.
         sent = set(re.findall(r'\b(?:run|perform)\(\s*"(\w+)"', code))
         self.assertLessEqual(sent, set(HANDLERS) | direct)

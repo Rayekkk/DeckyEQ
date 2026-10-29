@@ -11,6 +11,14 @@ All notable changes to DeckyEQ, newest first.
   Slider moves and the regular audio check are not logged, and nothing names your files.
 - **Updates.** A Downloads folder that is a link (for example to a microSD card) now works,
   and no half-finished file sits in Downloads while an update downloads.
+- **About.** Version, author and credits come first, and Updates sits at the very bottom. A
+  downloaded update shows where it was saved and how to install it in one place.
+- **Loading and connection.** The panel shows a spinner while DeckyEQ starts. If it cannot
+  start, or stops answering, the button is now **Try again**, and the main screen says how long
+  ago the values were last read.
+- **Confirmations.** Switching preset or discarding unsaved changes now warns that the changes
+  will be lost, and the delete and forget dialogs say what is removed and what stays.
+- **Texts.** Small wording fixes across the panel.
 
 ### Fixed
 

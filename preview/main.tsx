@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "../src/App";
 import { EqualizerIcon } from "../src/shared";
 import { Controller } from "../src/controller";
-import { UpdateController } from "../src/updates";
+import { UpdateController } from "../src/about";
 import { version } from "../package.json";
 import { PreviewEngine } from "./engine";
 import "./style.css";

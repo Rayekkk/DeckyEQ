@@ -137,7 +137,7 @@ it("renames, saves and deletes only user presets", async () => {
   fireEvent.click(button("Rename"));
   await waitFor(() => expect(engine.value.presets.at(-1)?.name).toBe("Ours"));
   fireEvent.click(button("Delete"));
-  fireEvent.click(within(await screen.findByRole("dialog", { name: "Delete preset?" })).getByRole("button", { name: "Delete" }));
+  fireEvent.click(within(await screen.findByRole("dialog", { name: "Delete “Ours”?" })).getByRole("button", { name: "Delete" }));
   await waitFor(() => expect(perform.mock.calls.some(call => call[0] === "delete")).toBe(true));
   expect(engine.value.state.selected).toBe("flat");
 });
@@ -163,7 +163,7 @@ it("confirms before replacing an edited draft", async () => {
   fireEvent.change(screen.getByRole("slider", { name: "Bass · below 120 Hz" }), { target: { value: "2" } });
   fireEvent.change(screen.getByRole("combobox", { name: "Preset" }), { target: { value: "test" } });
   const dialog = await screen.findByRole("dialog", { name: "Switch preset?" });
-  expect(dialog.textContent).toContain("Unsaved changes to “Flat” will be lost.");
+  expect(dialog.textContent).toContain("Unsaved changes to “Flat” are lost. The saved preset stays.");
   expect(perform.mock.calls.some(call => call[0] === "select")).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(engine.value.state.selected).toBe("flat");
@@ -228,7 +228,7 @@ it("toasts a failure of an action confirmed in a dialog, which hides the panel",
   perform.mockImplementationOnce(async () => ({ ok: false, error: "Disk full", state: await engine.status() }));
   open("Presets");
   fireEvent.click(button("Delete"));
-  fireEvent.click(within(await screen.findByRole("dialog", { name: "Delete preset?" })).getByRole("button", { name: "Delete" }));
+  fireEvent.click(within(await screen.findByRole("dialog", { name: "Delete “Mine”?" })).getByRole("button", { name: "Delete" }));
   await waitFor(() => expect(toast).toHaveBeenCalledWith("Disk full"));
 });
 
@@ -640,18 +640,20 @@ it("says Disconnected and locks the controls when the backend stops answering", 
   await waitFor(async () => { await controller.refresh(); expect(screen.getByText("Disconnected")).toBeTruthy(); });
   expect(document.querySelector(".deq-dot.live")).toBeNull();
   expect((screen.getByRole("slider", { name: "Bass · below 120 Hz" }) as HTMLInputElement).disabled).toBe(true);
-  expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  expect(screen.getByText(/^Last read \d+s ago · Retrying…$/)).toBeTruthy();  // The values shown are kept, and say how old they are.
 });
 
-it("offers Reconnect when the panel cannot load at all", async () => {
+it("offers Try again when the panel cannot load at all", async () => {
   const engine = new PreviewEngine();
   const failing = vi.spyOn(engine, "status").mockRejectedValue(new Error("backend gone"));
   const controller = new Controller(engine); controllers.push(controller);
   await controller.refresh();
   render(<App controller={controller} files={{ importFile: vi.fn(), exportFolder: vi.fn() }} />);
-  await screen.findByText("Could not load DeckyEQ");
+  await screen.findByText("DeckyEQ unavailable");
+  expect(screen.getByRole("alert").textContent).toMatch(/backend gone/);
   failing.mockRestore();
-  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByRole("switch", { name: "Enable EQ" });
 });
 
@@ -821,7 +823,7 @@ it("offers Save and Discard on the main screen only while the sound has unsaved 
   await act(async () => { await controller.flush(); });
   fireEvent.click(button("Discard"));
   const dialog = await screen.findByRole("dialog", { name: "Discard changes?" });
-  expect(dialog.textContent).toContain("Restore the saved version of “Mine”.");
+  expect(dialog.textContent).toContain("Unsaved changes are lost and the saved “Mine” comes back.");
   fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(engine.value.state.working.bass).toBe(3));
 });
@@ -1058,7 +1060,7 @@ it("has no card line repeating the Own sound switch, and one Forget dialog for a
   expect(screen.queryByText("Own sound for Celeste", { selector: ".deq-small" })).toBeNull();
   const forget = async () => {
     const dialog = await screen.findByRole("dialog", { name: "Forget the sound for Celeste?" });
-    expect(dialog.textContent).toContain("The game will use your everyday sound.");
+    expect(dialog.textContent).toContain("The game uses your everyday sound again.");
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
   };
   fireEvent.click(screen.getByRole("switch", { name: "Own sound for Celeste" }));
