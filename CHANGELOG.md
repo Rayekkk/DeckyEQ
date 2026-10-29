@@ -16,8 +16,10 @@ All notable changes to DeckyEQ, newest first.
 
 - **Damaged settings.** If the settings file is ever damaged, DeckyEQ restores your most
   recent settings instead of the ones before them, and keeps the damaged file beside it.
-- **Error messages.** An unexpected error shows a short message instead of details that
-  could include folder names; the details go to Decky's log.
+- **Error messages.** An unexpected error, or a file DeckyEQ cannot write (for example with
+  no permission), shows a short message instead of details that could include folder names;
+  the details go to Decky's log. When PipeWire reports why the equalizer stopped, your home
+  folder appears as `~`.
 
 ## [1.1.0] - 2026-10-24
 
@@ -32,7 +34,7 @@ reaches your speakers: Steam's volume and output now stay completely untouched.
 - Going back from 1.1 to 1.0 may fail to read settings that use stereo width or other
   1.1-only settings. Export your presets first.
 
-### New features
+### Added
 
 - **A new panel.** The main screen holds **Enable EQ**, **Volume boost**, **Preset**, the
   curve, and **Bass**, **Treble** and **Stereo width**; **Save** and **Discard** appear there
@@ -89,7 +91,7 @@ reaches your speakers: Steam's volume and output now stay completely untouched.
 - **Clearer messages:** errors stay on the page that caused them and also appear as a toast;
   outcomes such as an export path appear as a toast. While EQ is not live, the pages say why.
 
-### Fixes
+### Fixed
 
 - **Volume after a crash or an output change.** In 1.0 the speakers could stay at 100% when
   Decky crashed, when you picked the speakers in Steam, or after headphones or Bluetooth came
@@ -130,7 +132,7 @@ reaches your speakers: Steam's volume and output now stay completely untouched.
   several full audits by independent reviewers; device measurements are in
   [VALIDATION.md](docs/VALIDATION.md).
 
-## 1.0.0 - 2026-09-07
+## [1.0.0] - 2026-09-07
 
 First public release.
 

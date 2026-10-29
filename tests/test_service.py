@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from deckyeq.graph import SINK_NAME
 from deckyeq.model import EQError, NodeGone, OutputGone, ToolError, create_preset, flat_eq, export_document, initial_state, selected_preset
+from deckyeq.runtime import private
 from deckyeq.service import TOOL_RETRIES, Service
 from deckyeq.storage import Store, PresetFiles
 
@@ -283,6 +284,20 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "Settings could not be saved. Check free space.")
         self.assertNotIn(str(self.home), self.service.snapshot()["warning"])
 
+    async def test_an_audio_os_error_shows_only_its_description(self):
+        # E.g. the filter's config in the plugin's folder: the path names the user; the log keeps it.
+        error = OSError(13, "Permission denied", str(self.home / "runtime" / "deckyeq.conf"))
+        for action, method in (("enable", "start"), ("refresh", "apply")):
+            if action == "refresh":
+                self.assertTrue((await self.act("enable", enabled=True))["ok"])
+            with self.subTest(action), patch.object(self.runtime, method, side_effect=error), \
+                    self.assertLogs("deckyeq.service", "ERROR") as logs:
+                result = await self.act(action, **({"enabled": True} if action == "enable" else {}))
+            self.assertEqual(result["error"], "Permission denied")
+            self.assertNotIn("deckyeq.conf", json.dumps(self.service.snapshot()["audio"]))
+            self.assertIn("deckyeq.conf", "\n".join(logs.output))
+        self.assertEqual(self.service.error, "Permission denied")
+
     async def test_headphone_port_bypasses_then_speakers_resume(self):
         await self.act("enable", enabled=True)
         self.runtime.outputs[0]["speaker"] = False
@@ -464,6 +479,22 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.error, "The equalizer stopped: spa.audioconvert: assertion failed")
         self.assertGreater(self.service.retry_at, time.monotonic())  # The backoff decides when to start again.
         self.assertIsNone(self.runtime.process)
+
+    async def test_pipewire_errors_name_the_home_folder_as_a_tilde(self):
+        # PipeWire's stderr can name the plugin's files, under /home/<user>: the panel gets ~ instead; the log keeps it.
+        await self.act("enable", enabled=True)
+        self.runtime.process.returncode = 1
+        self.runtime.log = "mod.filter-chain: can't load /home/deck/homebrew/plugins/DeckyEQ/bin/deckyeq_dsp.so\n"
+        with patch("dk_process.session_env", return_value={"HOME": "/home/deck"}), \
+                self.assertLogs("deckyeq.service", "WARNING") as logs:
+            await self.run_monitor(until=lambda: self.service.phase == "error", change=lambda: True)
+        self.assertEqual(self.service.error, "The equalizer stopped: mod.filter-chain: can't load "
+                                             "~/homebrew/plugins/DeckyEQ/bin/deckyeq_dsp.so")
+        self.assertIn("/home/deck/homebrew", "\n".join(logs.output))
+        with patch("dk_process.session_env", return_value={"HOME": "/home/deck/"}):
+            self.assertEqual(private("open /home/deck/x and /home/deck"), "open ~/x and ~")
+        with patch("dk_process.session_env", return_value={"HOME": "/"}):
+            self.assertEqual(private("/etc/x"), "/etc/x")  # A root home must not turn every path into ~.
 
     async def test_a_filter_that_ended_after_playing_a_while_is_rebuilt_quietly(self):
         # As when PipeWire restarts: the filter process ends with the daemon, long after its start.

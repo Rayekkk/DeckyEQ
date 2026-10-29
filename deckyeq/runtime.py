@@ -51,6 +51,12 @@ def environment():
     return dk_process.session_env(LC_ALL="C.UTF-8")
 
 
+def private(text):
+    """Text for the panel (e.g. PipeWire's own errors) with the home folder, which names the user, as ~."""
+    home = (dk_process.session_env().get("HOME") or str(Path.home())).rstrip("/\\")
+    return text.replace(home, "~") if home else text
+
+
 def active_port(sink):
     port = sink.get("active_port") or ""
     if isinstance(port, dict):
@@ -470,7 +476,7 @@ class Runtime:
             if self.closing:  # Unloading: start() stops the half-started filter instead of waiting it out.
                 raise EQError("DeckyEQ is unloading.")
             if self.process.returncode is not None:
-                raise EQError("PipeWire could not start the equalizer: " + self.log[-240:])
+                raise EQError("PipeWire could not start the equalizer: " + private(self.log)[-240:])
             if time.monotonic() >= deadline:
                 await self.scan()  # An output unplugged meanwhile is no WirePlumber problem.
                 if self.target not in {o["name"] for o in self.outputs}:
@@ -608,7 +614,7 @@ class Runtime:
                 await self._write(neutral(), use_cache=False)
                 await asyncio.sleep(SETTLE_SECONDS)
             except Exception:
-                pass
+                pass  # Best effort: the filter process must end whatever went wrong.
         if self.process is not None and self.process.returncode is None:
             try:
                 self.process.terminate()

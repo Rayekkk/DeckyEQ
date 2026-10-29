@@ -308,8 +308,9 @@ headroom and output recovery in detail.
 <details>
 <summary><b>Build, test and package from source</b></summary>
 
-Requires Node.js 20 or newer, Python 3.10 or newer and gcc (on Windows: WSL with gcc and
-python3, which `npm test` also uses for the native-stage and Linux-only tests).
+Requires Node.js 24, Python 3.14 (the version Decky Loader 3.3.1 and SteamOS use) and gcc
+(on Windows: WSL with gcc and python3.14, which `npm test` also uses for the native-stage and
+Linux-only tests).
 
 ```bash
 npm ci
