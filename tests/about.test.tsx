@@ -163,7 +163,7 @@ it("lays out About with the plugin's info first and Updates at the very bottom",
   const { container } = render(<AboutPage name="DeckyEQ" version="1.1.0" description="A live equalizer." license="BSD-3-Clause"
     source="github.com/Rayekkk/DeckyEQ" notes="Notices are included." credits={[["PipeWire", "Runs the filters."]]} updates={controller}>
     <section><h2>Extra</h2></section></AboutPage>);
-  expect(Array.from(container.querySelectorAll("h2"), h => h.textContent)).toEqual(["DeckyEQ", "Extra", "Updates"]);
+  expect(Array.from(container.querySelectorAll("h2"), h => h.textContent)).toEqual(["DeckyEQ", "Extra", "Rayek's store", "Updates"]);
   expect(screen.getByText("Version 1.1.0")).toBeTruthy();
   expect(screen.getByText("Rayek · BSD-3-Clause · github.com/Rayekkk/DeckyEQ")).toBeTruthy();
   expect(screen.getByText("Runs the filters.")).toBeTruthy();
