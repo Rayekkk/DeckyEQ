@@ -476,7 +476,8 @@ class StorageTests(unittest.TestCase):
         first = self.files.write(document, "../my sound")
         second = self.files.write(document, "../my sound")
         self.assertNotEqual(first, second)
-        self.assertEqual(Path(first).parent, self.home / "Documents" / "DeckyEQ")
+        # resolve(): GitHub's Windows runner has an 8.3 TEMP (RUNNER~1), the export path is the long spelling.
+        self.assertEqual(Path(first).parent.resolve(), (self.home / "Documents" / "DeckyEQ").resolve())
         self.assertEqual(decode_import(self.files.read(first))[0]["eq"], flat_eq())
 
     def test_file_errors_are_short_and_name_no_path(self):
